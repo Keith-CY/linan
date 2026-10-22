@@ -60,8 +60,9 @@ snow. `?look=photo` shows the photographic render instead of ink, and `?debug=1`
 
 ## How to run
 
-You need Node.js 22 or newer and a desktop browser with WebGL 2 on a strong GPU. The world is heavy: the tab uses
-3.6–4.8 GB of JavaScript heap (see [the roadmap](docs/ROADMAP.md)). It was developed in Chrome on an Apple M1 Max.
+You need Node.js 22 or newer and a desktop browser with WebGL 2 on a strong GPU. The world is heavy: the tab holds
+about 0.5–0.7 GB of JavaScript heap and the GPU about 2 GB of geometry (see [the roadmap](docs/ROADMAP.md)). It was
+developed in Chrome on an Apple M1 Max.
 
 ```bash
 npm install
@@ -71,15 +72,31 @@ node tools/serve.mjs          # or: node tools/serve.mjs 8090 for another port
 Then open http://localhost:8080/. The first load takes a while; the loading screen shows its progress.
 
 The heavy rock geometry (the 飞来峰 cliff, the 布袋 and the rock sites) is not committed. Without it, the browser
-meshes it at load, which adds about a minute to every load, and the console shows a 404 for each missing
-`generated/*.bin` (harmless). To bake it once into `generated/` (~250 MB, git-ignored):
+meshes it at load, which adds about a minute to every load, and the console shows a 404 for each missing file in
+`generated/` (harmless). To bake it once (git-ignored):
 
 ```bash
 node tools/bake.mjs karst
 node tools/bake.mjs rocks
 ```
 
-Bake again after changing a generator; the bake names carry a version, and a missing bake falls back to building.
+Each bake writes `generated/<name>.bin` (floats as built, ~180 MB in all: the offline stills read these),
+`generated/<name>.geo` (quantised and gzipped, ~42 MB: the explorable page downloads these, the ones near the walker
+first) and `generated/manifest.json`. `node tools/bake.mjs compact` makes the `.geo` files and the manifest from
+existing `.bin` bakes. Bake again after changing a generator; the bake names carry a version, and a missing bake falls
+back to building.
+
+## Putting it on the web
+
+```bash
+node tools/build-site.mjs        # → dist/ (bake first: it takes the compact bakes of generated/manifest.json)
+node tools/serve.mjs 8090 dist   # check it, or any static server
+```
+
+`dist/` is a static site of about 45 MiB with no file over 6 MiB: `index.html`, `src/`, only the three.js files the page
+imports (the import map points inside `dist/`), the compact bakes and a `_headers` file for Cloudflare Pages or Netlify
+(a year's cache for three.js and the bakes, whose paths carry versions; revalidation for the page). About 6 MB is
+fetched before the first frame; the rocks and the cliff follow as the walker comes near.
 
 ## Rendering stills and video
 
@@ -148,9 +165,10 @@ design documents are in [`docs/`](docs): the art bible, the composition plan per
 
 ## Performance notes and known gaps
 
-The explorable world is heavy on memory and GPU, and it is not yet ready to be hosted for the public. Memory use,
-hitches when the vegetation is re-sorted around the walker, and the frame rate at the palace and on 御街 are the main
-problems. [`docs/ROADMAP.md`](docs/ROADMAP.md) lists these and the remaining differences from the targets.
+The explorable world is heavy on the GPU: about 2 GB of geometry once the walker has been everywhere, and a frame rate
+in the 30s at the palace and on 御街 at 1440 × 900 (the live painting's resolution adapts when frames run slow). The
+JS heap stays at about 0.5–0.7 GB, and the vegetation and terrain stream in slices without long frames.
+[`docs/ROADMAP.md`](docs/ROADMAP.md) has the measurements, what is left, and the remaining differences from the targets.
 
 ## Credits
 
@@ -177,6 +195,6 @@ MIT. See [`LICENSE`](LICENSE).
 - **水墨画师**：勾、皴、染、留白；笔触固定在世界里，走动时画面不会“游”。纯水墨、浅绛、青绿三种画风。
 - **漫游模式**：步行或飞行，十个名胜视角，六种时令，手机可触控操作。
 
-运行：`npm install`，然后 `node tools/serve.mjs`，打开 http://localhost:8080/ 。操作：WASD 行走，鼠标环顾，F 飞行，1–9 和 0 跳到名胜，T 切换时令，M 打开菜单。
+运行：`npm install`，然后 `node tools/serve.mjs`，打开 http://localhost:8080/ 。发布为静态网站：`node tools/build-site.mjs` 生成 `dist/`。操作：WASD 行走，鼠标环顾，F 飞行，1–9 和 0 跳到名胜，T 切换时令，M 打开菜单。
 
 `refs/` 里的参考图（写实十张、水墨十张）都是 AI 生成的（Qwen-Image 2.1），只用来对照，从不作为贴图。已知问题和性能情况见 [docs/ROADMAP.md](docs/ROADMAP.md)。MIT 许可。

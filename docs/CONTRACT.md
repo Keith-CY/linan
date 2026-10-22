@@ -17,8 +17,13 @@ reference images in `refs/` are only compared against, never loaded by the world
   (streamed terrain in workers, walker, interface, tree cover, countryside and hamlets for ground no shot looked at).
   Modules see `engine.explore === true` and must not assume the shot cameras there: LOD from the moving camera
   (`engine.registry.lodSwitch`, `registry.city.houseLod`, VegSystem far pages), no per-shot terrain or occlusion.
-  Headless checks: `node tools/explore-session.mjs --port 9480 [--mobile]`, then `/eval`, `/shot` (see the file);
-  `tools/explore-fps.mjs`, `tools/explore-walk.mjs` and `tools/explore-match.mjs` talk to that session.
+  Headless checks: `node tools/explore-session.mjs --port 9480 [--mobile]`, then `/eval`, `/shot` (see the file;
+  `--glmem` counts the WebGL buffer and texture bytes, `/heap` reports the JS heap, `--profile` records the load's CPU
+  profile, `--url` opens a page served elsewhere, e.g. `dist/`); `tools/explore-fps.mjs`, `tools/explore-walk.mjs`,
+  `tools/explore-match.mjs` and `tools/explore-mem.mjs` (the heap and GPU memory over a 10-minute walk / run / fly
+  route through every viewpoint) talk to that session.
+- The static site: `node tools/build-site.mjs` → `dist/` (the page, `src/`, only the three.js files it imports, the
+  compact bakes of `generated/manifest.json`, a `_headers` file); any static server, e.g. `node tools/serve.mjs 8090 dist`.
 - Interactive shot viewer: http://localhost:8080/?shot=3 (keys 1–9 = shots 1–9, 0 = shot 10, P prints the camera).
 - Render a shot of the full world: `node tools/render.mjs --shot 3 --quality preview` → `out/shot3.png` and
   `out/shot3_cmp.png` (reference | render, both 540 px high). Shots are 1–10; `--shot all` builds the world once and
@@ -49,8 +54,10 @@ export async function build(engine) { ... }   // populate the FULL world from sr
 export async function test(engine) { ...; return { views: [{ pos, target, fov, sun? }] } } // isolated scene
 ```
 `src/world/index.js` runs the modules in `MODULE_ORDER` (terrain → water → yingzao → pagodas → karst → rocks →
-bridges → city → boats → tide → vegetation → mist). A throw is caught and logged (the rest still builds); a module
-whose file does not exist is skipped. A new module gets a line in `MODULE_ORDER`. Reusable generators live in their
+bridges → city → boats → tide → vegetation → mist; the explorable world builds in `EXPLORE_ORDER`, the water after the
+bridges: its height maps come from the height workers while the buildings build). A throw is caught and logged (the
+rest still builds); a module whose file does not exist is skipped. A new module gets a line in both orders; a module's
+`prefetch(engine)` may start worker jobs that depend on nothing built (called once the terrain is in, explore only). Reusable generators live in their
 own folder (`src/yingzao/`, `src/vegetation/`, `src/karst/`, `src/city/` …).
 
 Engine API (`src/core/engine.js`): `engine.scene`, `engine.camera`, `engine.renderer`, `engine.quality`
@@ -123,9 +130,17 @@ with that camera. Where a reference needs something the real place cannot give, 
 - The cameras are known (`src/world/shots.js`): spend detail where they look, near them, and nowhere else (LOD by
   distance from the shot cameras is expected; the terrain does it with a camera-driven quadtree).
 - Scale counts and resolution with `engine.quality.density / detail`. Log build time and triangle count.
-- Heavy procedural geometry may be baked: `loadOrBuild(name, fn)` (`src/core/cache.js`) + `src/bake/<name>.js` +
-  `node tools/bake.mjs <name>` → `generated/*.bin` (git-ignored). Bump the name when the generator changes; the runtime
-  falls back to building when the file is missing.
+- Heavy procedural geometry may be baked: `loadOrBuild(name, fn)` (`src/core/cache.js`) + `src/bake/<name>.js` (with
+  `bakeNames()`) + `node tools/bake.mjs <name>` → `generated/<name>.bin` (floats: the offline stills read these),
+  `generated/<name>.geo` (compact, `src/core/bakefmt.js`: 16-bit positions in the mesh's box, octahedral normals,
+  delta-coded indices, gzipped; what the explorable page downloads) and `generated/manifest.json` (git-ignored). Bump
+  the name when the generator changes; the runtime falls back to building when the file is missing. The explorable world
+  takes compact bakes through `lazyBake(name, fn)`: a placeholder with the bake's bounds, filled when `src/explore/lazy.js`
+  loads it (near the walker, or for a still view that reaches it).
+- Built geometry is shared and its CPU copy may be gone: the building builders' meshes are welded into indexed geometry
+  (`src/core/compact.js`, exact), identical buildings share one geometry (`src/yingzao/memo.js`), and the explorable
+  world drops the arrays of static geometry once uploaded. Never change a built geometry in place or read its arrays at
+  runtime (set `geometry.userData.keepArrays` on one that must stay readable).
 - Per-shot cost controls: the terrain is one quadtree **per shot** (only the current shot's set is shown; shared leaves
   meshed once); `engine.applyShot` drops shadow casters beyond the shadow range (`shadowMaxFar` × 1.1, or a look's
   `shadowRange`) and small far ones; `world/index.js` hides, per shot, every building, pagoda, bridge, boat, rock site
@@ -141,7 +156,8 @@ with that camera. Where a reference needs something the real place cannot give, 
 - Same code → same image. Seeded RNG only (`engine.rng(label)`, `hash01(...)`, `mulberry32`); never `Math.random`,
   `Date`, `performance.now()` in anything that shapes the world (timing logs are fine).
 - Animation reads the engine time (`onUpdate(t)`), never the wall clock.
-- No network, no external files at runtime (the baked `generated/*.bin` are a cache of what the code builds).
+- No network, no external files at runtime (the baked `generated/*.bin` and `*.geo` are a cache of what the code
+  builds).
 
 ## Working on a module
 

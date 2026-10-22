@@ -5,20 +5,35 @@ What is still rough, roughly in order of how much it matters. Measurements are f
 
 ## Performance of the explorable world
 
-- **Memory.** The JS heap is ~3.6 GB right after the world loads and grows to ~4.8 GB in a long session. Chrome's
-  per-tab limit there is ~4.4 GB, so a long walk can crash the tab. This has to come down before the world can be
-  hosted for the public; the resident vegetation pages, terrain leaves and the still view's resources are the first
-  places to look.
-- **Vegetation hitches.** The instanced vegetation is re-bucketed around the walker every ~90 m (a 90–125 ms hitch)
-  and once more on leaving a viewpoint's still view (~200 ms). Spreading the re-bucket over several frames or moving
-  it to a worker would hide it.
-- **Frame rate.** Walking is slowest at the palace (皇城, ~24 fps measured under load) and on 御街 (~31 fps), where
-  many buildings sit inside the full-detail band. The adaptive render scale drops to 0.55–0.9 of the window when
-  frames run slow. Cheaper middle building levels and fewer shadow casters there are the obvious next steps.
-- **Load time.** About 24 s on the development machine before the first frame. Without the baked rock and karst
-  meshes (`node tools/bake.mjs karst`, `node tools/bake.mjs rocks`) the 飞来峰 cliff and the rock sites are meshed
-  at load, which adds about a minute.
-- **The painter.** The ink painter is one long full-screen pass (~10 ms at 1440 × 900). Splitting the washes to half
+Measured on the development machine in October 2026 while other work kept it heavily loaded (load averages 30–200);
+the figures in brackets are from the code before that month's performance work, run alternately with it under the
+same conditions.
+
+- **Memory.** After the load the JS heap is ~0.54 GB (~80 MB of objects, ~0.46 GB of typed arrays) and it levels off at
+  ~0.7 GB within six minutes of walking, running and flying through every viewpoint (`tools/explore-mem.mjs`; it was
+  3.5 GB after the load and 4.0 GB after ten minutes). The buildings' meshes are welded into indexed geometry (38 M
+  vertices → 16 M), identical buildings share one, and the static geometry lives on the GPU only: it is all uploaded at
+  the start and its CPU copies dropped (terrain patches and lazily loaded bakes the same once drawn). The GPU holds
+  ~1.5 GB of buffers after the load and ~2.1 GB after ten minutes (1.5 → 3.1 GB before), ~0.3 GB of textures while
+  walking and ~0.7–1.0 GB while a still view is up (its targets are given back after 5 s of walking). The largest
+  remaining CPU arrays are the vegetation's instance pages (~140 MB, both far sets included).
+- **Hitches.** The far impostors are refilled in ~3 ms slices into a second set of pages (a 50–160 ms frame every
+  90 m before); the near re-bucket is ≤ 13–21 ms (≤ 37 ms at the heaviest load), with the terrain-occlusion tests
+  spread over frames. Leaving the still view costs 13–37 ms (60–120 ms), its plant re-bucket (250–520 ms) runs in
+  slices while the view is prepared. The auto levels of the live painting are solved on the GPU: the read-back they
+  replaced blocked the page 30–100 ms every 24 frames with vsync (300–700 ms without).
+- **Frame rate.** With the default settings at 1440 × 900 walking runs at 33–35 fps at the palace (17–24 before) and
+  27–28 on 御街 (19–34), on a GPU shared with other work; one live frame costs the GPU 21–33 ms at the ten places
+  (`tools/explore-fps.mjs --cost`). Not yet measured on an idle machine against the 40 fps goal. The painter pass,
+  the 2048² shadow cascades and the vegetation near the palace are the next costs to look at.
+- **Load time.** 23–29 s to the first walking frame at moderate load (34–38 s before; 29–44 s against 41–68 s at load
+  averages above 100). The water's height maps, the tree cover's candidates and the shots' hill cover's ground are
+  computed in the height workers while the buildings build; identical buildings are built once; the rocks and the
+  飞来峰 cliff load as compact bakes when the walker comes within 2.5–3 km (a still view waits for the full-detail
+  bakes it reaches). The buildings themselves (~7 s) and the vegetation library and placement (~4 s) are the rest.
+- **Download.** `node tools/build-site.mjs` writes a 45 MiB static site: the page and its modules 3.9 MiB, the compact
+  bakes 41.5 MiB (the largest file 5.8 MiB); ~6 MB is fetched before the first frame.
+- **The painter.** The ink painter is one long full-screen pass (~5–13 ms at 1440 × 900). Splitting the washes to half
   resolution would help weaker GPUs.
 
 ## The explorable world
@@ -28,7 +43,8 @@ What is still rough, roughly in order of how much it matters. Measurements are f
 - 望山桥 and 断桥 lie along their causeways in the explorable world; their art-directed axes apply to the shot
   cameras only.
 - The photographic look (`?look=photo`) runs in the explorable world but is not tuned for it.
-- Phones: the interface has touch controls, but the memory use above is far beyond what phone browsers allow.
+- Phones: the interface has touch controls, but the GPU memory above (~2 GB of geometry) is beyond what phone browsers
+  allow.
 
 ## The ten views against the ink targets
 
