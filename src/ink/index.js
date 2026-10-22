@@ -170,7 +170,8 @@ export function installInk(engine) {
     // while walking: engine.shot.pos), so the ripple rows and ground strokes do not slide with the walker
     const anchor = engine.shot?.pos || sp;
     const boreFront = shot.match ? engine.registry.tide?.inkFront?.() : null;
-    painter.paint(gb, engine.camera, style, shot, { focus, shotPos: sp, anchor, org: gReady ? null : ink.anchor, motion: gReady || !!ink.motion, boreFront, sunI, sunDir: SUN.dir, axisR, axisF, dbg: dbg && dbg.startsWith('paint') ? Number(dbg.slice(5)) || 0 : 0 }, target);
+    // ink.prevVP: the tour video's camera a frame earlier (src/video/player.js; how far the ground travels in a frame)
+    painter.paint(gb, engine.camera, style, shot, { focus, shotPos: sp, anchor, org: gReady ? null : ink.anchor, motion: gReady || !!ink.motion, prevVP: gReady ? null : ink.prevVP, boreFront, sunI, sunDir: SUN.dir, axisR, axisF, dbg: dbg && dbg.startsWith('paint') ? Number(dbg.slice(5)) || 0 : 0 }, target);
     if (timing) gl.finish();
     ink.stats.inkMs = Math.round(performance.now() - t0);
     window.__STATS = { ...(window.__STATS || {}), inkMs: ink.stats.inkMs };
@@ -182,7 +183,7 @@ export function installInk(engine) {
   ink.renderRealtime = () => {
     const t0 = performance.now();
     patchScene(engine);
-    engine.lighting.update(null);
+    engine.lighting.update(null, false);   // (one frame, nothing accumulated: the noise offsets stay put)
     const t1 = performance.now();
     renderGBuffer(engine, gbuf, { shadows: true });
     const t2 = performance.now();
@@ -190,11 +191,22 @@ export function installInk(engine) {
     pipe.realtime = true;
     ink.painter.cachePaper = true;
     const P0 = ink.painter;
-    if (!ink.liveRT || ink.liveRT.width !== P0.w || ink.liveRT.height !== P0.h) { ink.liveRT?.dispose(); ink.liveRT = colorRT(P0.w, P0.h); }
-    paintFrame(ink.liveRT, ++rtFrame, true);
+    if (!ink.rawRT || ink.rawRT.width !== P0.w || ink.rawRT.height !== P0.h) {
+      ink.rawRT?.dispose(); ink.rawRT = colorRT(P0.w, P0.h);
+      for (const r of ink.taaRTs || []) r.dispose();
+      ink.taaOut?.dispose(); ink.taaMid?.dispose();
+      ink.taaRTs = [taaRT(P0.w, P0.h), taaRT(P0.w, P0.h)]; ink.taaOut = colorRT(P0.w, P0.h); ink.taaMid = taaRT(P0.w, P0.h); ink.taaValid = false;
+    }
+    paintFrame(ink.rawRT, ++rtFrame, true);
     pipe.hdrOverride = null;
+    // the painting's own temporal anti-aliasing (below; ?taa=0 turns it off): the previous paintings, reprojected through
+    // the G-buffer's depth to where their strokes now lie, blended in under a clamp to this frame's neighbourhood
+    if (P.get('taa') === '0') ink.liveRT = ink.rawRT;
+    else ink.liveRT = temporalAA(engine, ink, gbuf);
     ink.rtTimes = { prep: t1 - t0, scene: t2 - t1, paint: performance.now() - t2 };
   };
+  /** the next live painting starts the history afresh (a teleport, a new look, the still view left) */
+  ink.resetHistory = () => { ink.taaValid = false; };
   // the explorable world's still view: exactly the offline still (src/core/engine.js renderStill at one sample, which
   // the stills use: the accumulation and MSAA change < 0.5 / 255) — the photographic frame graded with every effect,
   // the G-buffer at twice the resolution, every painter pass at full strength. Painted into ink.stillRT.
@@ -262,6 +274,182 @@ export function installInk(engine) {
     gbuf.setSize(Math.round(w * gs), Math.round(h * gs));
   };
   return ink;
+}
+
+// ------------------------------------------------------------------ the live painting's temporal anti-aliasing
+// One painting a frame from a one-sample G-buffer: its marks over sub-pixel detail (leaf dots, slab joints, the lines of
+// the roofs and the trunks) step and shimmer from one frame to the next as the walker moves. Each frame is blended with
+// the previous ones, reprojected to where the world put them (every pixel's world point from the G-buffer's depth,
+// projected with the previous camera), so the blend follows the strokes on the world, not the screen:
+//   * the blend is of the ink alone: the painting divided by the paper (fixed to the sheet, src/ink/painter.js
+//     paperRT), and the result laid on this frame's paper again, so the paper's grain stays crisp while the ink moves;
+//   * the history is read with a Catmull-Rom filter (bilinear reads would soften it a little every frame), kept at
+//     TAA_KEEP and clamped to the range of this frame's 3 × 3 neighbourhood widened by TAA_LOOSE times its own width
+//     (the world stands still while walking, so what the reprojected history disagrees on is mostly the painting's own
+//     view-dependent marks, which it is there to average; clamped to the bare range it kept almost none of them);
+//   * a history pixel whose depth was not this point's (it lay behind something, or off the frame) is not used.
+// ?taa=0 turns it off (?taaKeep, ?taaLoose: other settings).
+const TAA_KEEP = 0.9, TAA_LOOSE = 3;
+const taaQuad = new FullScreenQuad(null);
+const taaMat = new THREE.ShaderMaterial({
+  glslVersion: THREE.GLSL3,
+  uniforms: {
+    tCur: { value: null }, tHist: { value: null }, tA: { value: null }, tPaper: { value: null }, uPaperOn: { value: 0 },
+    uGRes: { value: new THREE.Vector2(1, 1) }, uRes: { value: new THREE.Vector2(1, 1) },
+    uInvProj: { value: new THREE.Matrix4() }, uCamWorld: { value: new THREE.Matrix4() }, uPrevVP: { value: new THREE.Matrix4() }, uKeep: { value: TAA_KEEP }, uLoose: { value: 0 },
+  },
+  vertexShader: 'out vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: /* glsl */`
+    precision highp float;
+    uniform sampler2D tCur, tHist, tA, tPaper; uniform float uPaperOn, uKeep, uLoose;
+    uniform vec2 uGRes, uRes; uniform mat4 uInvProj, uCamWorld, uPrevVP;
+    in vec2 vUv;
+    out vec4 oHist;
+    // the ink of a pixel: the painting over the paper (the paper alone is 1)
+    vec3 inkAt(ivec2 p) {
+      p = clamp(p, ivec2(0), ivec2(uRes) - 1);
+      vec3 c = texelFetch(tCur, p, 0).rgb;
+      return uPaperOn > 0.5 ? c / max(texelFetch(tPaper, p, 0).rgb, vec3(0.05)) : c;
+    }
+    // Catmull-Rom from 9 bilinear reads (after Jimenez / Pettineo)
+    vec3 histCR(vec2 uv) {
+      vec2 sp = uv * uRes, t1 = floor(sp - 0.5) + 0.5, f = sp - t1;
+      vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f), w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
+      vec2 w12 = w1 + w2, t0 = (t1 - 1.0) / uRes, t3 = (t1 + 2.0) / uRes, t12 = (t1 + w2 / w12) / uRes;
+      return texture(tHist, vec2(t0.x, t0.y)).rgb * w0.x * w0.y + texture(tHist, vec2(t12.x, t0.y)).rgb * w12.x * w0.y + texture(tHist, vec2(t3.x, t0.y)).rgb * w3.x * w0.y
+           + texture(tHist, vec2(t0.x, t12.y)).rgb * w0.x * w12.y + texture(tHist, vec2(t12.x, t12.y)).rgb * w12.x * w12.y + texture(tHist, vec2(t3.x, t12.y)).rgb * w3.x * w12.y
+           + texture(tHist, vec2(t0.x, t3.y)).rgb * w0.x * w3.y + texture(tHist, vec2(t12.x, t3.y)).rgb * w12.x * w3.y + texture(tHist, vec2(t3.x, t3.y)).rgb * w3.x * w3.y;
+    }
+    void main() {
+      ivec2 p = ivec2(gl_FragCoord.xy);
+      vec3 c = inkAt(p);
+      float D = texelFetch(tA, clamp(ivec2(vUv * uGRes), ivec2(0), ivec2(uGRes) - 1), 0).z;
+      float keep = 0.0;
+      vec3 h = c;
+      if (uKeep > 0.0) {
+        // this pixel's world point → where it was in the previous frame, and how far from that camera
+        vec4 v = uInvProj * vec4(vUv * 2.0 - 1.0, 1.0, 1.0); vec3 r = v.xyz / v.w;
+        vec3 Pw = (uCamWorld * vec4(r * (min(D, 40000.0) / -r.z), 1.0)).xyz;
+        vec4 q = uPrevVP * vec4(Pw, 1.0);
+        vec2 pv = q.xy / q.w * 0.5 + 0.5;
+        if (q.w > 0.0 && all(greaterThanEqual(pv, vec2(0.0))) && all(lessThanEqual(pv, vec2(1.0)))) {
+          // the history's own depths round there (the four texels the read spans): this surface, or one that stood
+          // in front of this point then
+          ivec2 hp = ivec2(floor(pv * uRes - 0.5)), hm = ivec2(uRes) - 1;
+          float d0 = texelFetch(tHist, clamp(hp, ivec2(0), hm), 0).a, d1 = texelFetch(tHist, clamp(hp + ivec2(1, 0), ivec2(0), hm), 0).a;
+          float d2 = texelFetch(tHist, clamp(hp + ivec2(0, 1), ivec2(0), hm), 0).a, d3 = texelFetch(tHist, clamp(hp + ivec2(1, 1), ivec2(0), hm), 0).a;
+          float dn = min(min(d0, d1), min(d2, d3)), dx = max(max(d0, d1), max(d2, d3));
+          bool same = D >= 40000.0 ? dn >= 40000.0 : q.w >= dn * 0.97 - 0.05 && q.w <= dx * 1.03 + 0.05;
+          if (same) {
+            vec3 mn = c, mx = c;
+            for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+              if (i == 0 && j == 0) continue;
+              vec3 n = inkAt(p + ivec2(i, j));
+              mn = min(mn, n); mx = max(mx, n);
+            }
+            vec3 ex = (mx - mn) * uLoose + uLoose * 0.1;
+            h = clamp(histCR(pv), mn - ex, mx + ex);
+            keep = uKeep;
+          }
+        }
+      }
+      oHist = vec4(mix(c, h, keep), min(D, 40000.0));
+    }`,
+  depthTest: false, depthWrite: false,
+});
+// this frame's paper under the blended ink → the live painting (8 bits, what ink.present shows). The ink is blurred
+// along each pixel's travel on the screen since the last frame (from the G-buffer's depth and the previous camera): a
+// tent over the travel of TAA_BLUR frames each way, as a film camera's exposure would (a tent of one frame each way is
+// nought at the next frame's place: a line still showed in a single frame). A mark that slides by more than
+// its own width between two frames (the slab joints and the shadows under the walker's feet, the roof tiles below a
+// flight, the leaves going by) otherwise lies in a pixel in one frame and is gone in the next: every fine mark pops.
+// Standing still nothing moves and nothing is blurred. ?mblur=0 turns it off, ?mblur=k sets TAA_BLUR.
+const TAA_BLUR = 1.75, TAA_TAPS = 16;
+const taaOutMat = new THREE.ShaderMaterial({
+  glslVersion: THREE.GLSL3,
+  uniforms: {
+    tHist: { value: null }, tPaper: { value: null }, uPaperOn: { value: 0 }, tA: { value: null },
+    uGRes: { value: new THREE.Vector2(1, 1) }, uRes: { value: new THREE.Vector2(1, 1) },
+    uInvProj: { value: new THREE.Matrix4() }, uCamWorld: { value: new THREE.Matrix4() }, uPrevVP: { value: new THREE.Matrix4() }, uBlur: { value: TAA_BLUR }, uPass: { value: 1 },
+  },
+  vertexShader: 'out vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: /* glsl */`
+    precision highp float;
+    uniform sampler2D tHist, tPaper, tA; uniform float uPaperOn, uBlur, uPass;
+    uniform vec2 uGRes, uRes; uniform mat4 uInvProj, uCamWorld, uPrevVP;
+    in vec2 vUv; out vec4 o;
+    void main() {
+      ivec2 p = ivec2(gl_FragCoord.xy);
+      vec3 t = texelFetch(tHist, p, 0).rgb;
+      if (uBlur > 0.0) {
+        float D = texelFetch(tA, clamp(ivec2(vUv * uGRes), ivec2(0), ivec2(uGRes) - 1), 0).z;
+        vec4 v = uInvProj * vec4(vUv * 2.0 - 1.0, 1.0, 1.0); vec3 r = v.xyz / v.w;
+        vec3 Pw = (uCamWorld * vec4(r * (min(D, 40000.0) / -r.z), 1.0)).xyz;
+        vec4 q = uPrevVP * vec4(Pw, 1.0);
+        // the travel (px) since the last frame; none known for a point behind the last camera
+        vec2 d = q.w > 0.0 ? vUv * uRes - (q.xy / q.w * 0.5 + 0.5) * uRes : vec2(0.0);
+        float L = length(d) * uBlur;
+        if (L > 0.5 && L < 2000.0) {
+          // two passes of n taps (uPass 0: n taps spaced 2L / n, tent-weighted; 1: n taps over one such space): the
+          // tent sampled n² times. Taps a few px apart are separate copies of every mark that step along as it moves
+          int n = int(clamp(ceil(sqrt(L * 2.0)), 2.0, float(${TAA_TAPS})));
+          vec3 c = vec3(0.0); float ws = 0.0;
+          for (int i = 0; i < ${TAA_TAPS}; i++) {
+            if (i >= n) break;
+            float u = (float(i) + 0.5) / float(n);
+            float s = uPass < 0.5 ? u * 2.0 - 1.0 : (u - 0.5) * 2.0 / float(n), w = uPass < 0.5 ? 1.0 - abs(s) : 1.0;
+            c += texture(tHist, vUv + d * (s * uBlur) / uRes).rgb * w; ws += w;
+          }
+          t = c / ws;
+        }
+      }
+      if (uPass < 0.5) { o = vec4(t, 1.0); return; }
+      o = vec4(clamp(uPaperOn > 0.5 ? t * max(texelFetch(tPaper, p, 0).rgb, vec3(0.05)) : t, 0.0, 1.0), 1.0);
+    }`,
+  depthTest: false, depthWrite: false,
+});
+/** the history targets: the blended ink and the depth it was seen at (half floats, filtered for the Catmull-Rom reads) */
+function taaRT(w, h) {
+  return new THREE.WebGLRenderTarget(w, h, {
+    type: THREE.HalfFloatType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace,
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false, stencilBuffer: false, generateMipmaps: false,
+  });
+}
+const _vp = new THREE.Matrix4();
+function temporalAA(engine, ink, gbuf) {
+  const cam = engine.camera, U = taaMat.uniforms, r = engine.renderer, P0 = ink.painter;
+  const [hist, next] = ink.taaRTs;
+  _vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+  // a jump (teleport, a new look): no history
+  if (ink.taaCam && ink.taaCam.distanceTo(cam.position) > 6) ink.taaValid = false;
+  const paper = P0.cachePaper && P0.paperRT ? P0.paperRT.texture : null;
+  U.tCur.value = ink.rawRT.texture; U.tHist.value = hist.texture; U.tA.value = gbuf.textures[1];
+  U.tPaper.value = paper; U.uPaperOn.value = paper ? 1 : 0;
+  U.uGRes.value.set(gbuf.width, gbuf.height); U.uRes.value.set(ink.rawRT.width, ink.rawRT.height);
+  U.uInvProj.value.copy(cam.projectionMatrixInverse); U.uCamWorld.value.copy(cam.matrixWorld);
+  U.uPrevVP.value.copy(ink.taaValid ? ink.taaVP : _vp); U.uKeep.value = ink.taaValid ? ink.taaKeep ?? TAA_KEEP : 0;
+  U.uLoose.value = engine.params.get('taaLoose') ? Number(engine.params.get('taaLoose')) : TAA_LOOSE;
+  if (engine.params.get('taaKeep')) U.uKeep.value = ink.taaValid ? Number(engine.params.get('taaKeep')) : 0;
+  taaQuad.material = taaMat;
+  r.setRenderTarget(next); taaQuad.render(r);
+  const O = taaOutMat.uniforms;
+  O.tHist.value = next.texture; O.tPaper.value = paper; O.uPaperOn.value = paper ? 1 : 0;
+  O.tA.value = U.tA.value; O.uGRes.value.copy(U.uGRes.value); O.uRes.value.copy(U.uRes.value);
+  O.uInvProj.value.copy(U.uInvProj.value); O.uCamWorld.value.copy(U.uCamWorld.value); O.uPrevVP.value.copy(U.uPrevVP.value);
+  const mb = engine.params.get('mblur');
+  O.uBlur.value = mb === '0' ? 0 : Number(mb) || TAA_BLUR;
+  taaQuad.material = taaOutMat;
+  if (O.uBlur.value > 0) {
+    O.uPass.value = 0; r.setRenderTarget(ink.taaMid); taaQuad.render(r);
+    O.tHist.value = ink.taaMid.texture;
+  }
+  O.uPass.value = 1;
+  r.setRenderTarget(ink.taaOut); taaQuad.render(r);
+  ink.taaRTs = [next, hist];
+  (ink.taaVP ||= new THREE.Matrix4()).copy(_vp);
+  (ink.taaCam ||= new THREE.Vector3()).copy(cam.position);
+  ink.taaValid = true;
+  return ink.taaOut;
 }
 
 // ------------------------------------------------------------------ debug views (?inkDebug=…)

@@ -62,7 +62,9 @@ export async function afterBuild(engine) {
   S.walker = new Walker(engine);
   S.walker.collect();
   engine.pipeline.realtime = true;
-  engine.pipeline.levelsEvery = 24;
+  // the auto levels: re-solved on the GPU every 3 frames and eased toward the new solve (steps of a third every 24
+  // frames read as a pulse of the whole painting's washes while walking); the read-back fallback every 24 frames
+  engine.pipeline.levelsEvery = 24; engine.pipeline.levelsEveryGpu = 3; engine.pipeline.levelsRate = 0.12;
   // the painting leaves the water as paper with ripple lines: the planar mirror (a second scene pass, ~11 ms) is off
   const refl = engine.registry.water?.reflection;
   if (ink && refl && P.get('refl') !== '1') { refl.enabled = false; refl.uniforms.uReflOn.value = 0; }
@@ -87,6 +89,7 @@ function afterLook(id) {
   S.lastApply = p.clone();
   S.region = e.registry.water?.region?.({ pos: [p.x, p.y, p.z] });
   e.pipeline._lv = null;           // a new look: solve the levels afresh
+  e.ink?.resetHistory?.();         // (and the live painting's temporal anti-aliasing starts afresh)
   S.dirty = 3;
   S.ui?.setState({ place: S.place, look: S.look, mode: S.walker?.mode });
 }
@@ -107,6 +110,7 @@ function teleport(id, { look = true } = {}) {
   const v = viewpoint(e, id);
   const cam = e.camera;
   S.place = id;
+  e.ink?.resetHistory?.();
   if (look) {
     // exactly what a still applies (the ink cameras through src/ink/index.js, the look of the shot)
     e.applyShot(SHOTS.find((x) => x.id === id) || v);

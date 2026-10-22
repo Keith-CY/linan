@@ -71,11 +71,13 @@ export class Engine {
       THREE.ShaderChunk.lights_fragment_begin = CG_DFG_FIX_GLSL + THREE.ShaderChunk.lights_fragment_begin;
     }
     // three r186 PCF shadows rotate their Vogel-disk taps by interleaved gradient noise of gl_FragCoord: a pattern
-    // fixed to the pixel grid, which the accumulation cannot average away (a halftone in every penumbra). Offset
-    // the noise by a per-sample jitter (SHADOW_JITTER, advanced by Lighting.update) so it averages out.
+    // fixed to the pixel grid, which the accumulation cannot average away (a halftone in every penumbra). The noise
+    // is taken of the shadow map's own texels instead (the cascades are snapped to them: the pattern holds to the
+    // ground as the camera moves, where one of the screen crawled over every penumbra), offset by a per-sample jitter
+    // (SHADOW_JITTER, advanced by Lighting.update) so an accumulation averages it out.
     if (!THREE.ShaderChunk.shadowmap_pars_fragment.includes('cgShadowJitter')) {
       THREE.ShaderChunk.shadowmap_pars_fragment = 'uniform vec2 cgShadowJitter;\n' +
-        THREE.ShaderChunk.shadowmap_pars_fragment.replaceAll('interleavedGradientNoise( gl_FragCoord.xy )', 'interleavedGradientNoise( gl_FragCoord.xy + cgShadowJitter )');
+        THREE.ShaderChunk.shadowmap_pars_fragment.replaceAll('interleavedGradientNoise( gl_FragCoord.xy )', 'interleavedGradientNoise( floor( shadowCoord.xy * shadowMapSize ) + cgShadowJitter )');
     }
     const d = dirFromAzEl(SUN_DEFAULT.azimuth, SUN_DEFAULT.elevation);
     this.lighting.setSun(new THREE.Vector3(...d));

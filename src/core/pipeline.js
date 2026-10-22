@@ -192,11 +192,11 @@ class GpuLevels {
     this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this.solveMat = new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
-      uniforms: { tHist: { value: null }, tPrev: { value: null }, uN: { value: 1 }, uT: { value: new Float32Array(5) }, uS: { value: 1 }, uBlend: { value: 0 } },
+      uniforms: { tHist: { value: null }, tPrev: { value: null }, uN: { value: 1 }, uT: { value: new Float32Array(5) }, uS: { value: 1 }, uBlend: { value: 0 }, uRate: { value: 0.35 } },
       vertexShader: 'precision highp float; in vec3 position; void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }',
       fragmentShader: /* glsl */`
         precision highp float; precision highp int;
-        uniform sampler2D tHist, tPrev; uniform float uN; uniform float uT[5]; uniform float uS; uniform float uBlend;
+        uniform sampler2D tHist, tPrev; uniform float uN; uniform float uT[5]; uniform float uS; uniform float uBlend, uRate;
         out vec4 o;
         float pct(float q) {
           float k = q * uN, c = 0.0;
@@ -234,7 +234,7 @@ class GpuLevels {
             run = j == 0 ? v : max(run, v);
             if (j == jj) break;
           }
-          if (uBlend > 0.5) { float p = texelFetch(tPrev, ivec2(jj, 0), 0).r; run = p + (run - p) * 0.35; }
+          if (uBlend > 0.5) { float p = texelFetch(tPrev, ivec2(jj, 0), 0).r; run = p + (run - p) * uRate; }
           o = vec4(run, 0.0, 0.0, 1.0);
         }`,
       depthTest: false, depthWrite: false,
@@ -246,7 +246,7 @@ class GpuLevels {
   setCurve(v) { this.cpu.image.data.set(v); this.cpu.needsUpdate = true; this.lut = this.cpu; }
 
   /** measure lvRT (RGBA8, graded without the levels) and solve; fresh: no blend with the previous curve */
-  solve(lvRT, target5, S, fresh) {
+  solve(lvRT, target5, S, fresh, rate = 0.35) {
     const r = this.r, n = lvRT.width * lvRT.height, g = this.points.geometry;
     if (g.attributes.position?.count !== n) {
       // (one point per measured pixel; the vertex shader places it from its index: the positions are a draw count)
@@ -262,7 +262,7 @@ class GpuLevels {
     const U = this.solveMat.uniforms;
     U.tHist.value = this.hist.texture; U.uN.value = n; U.uS.value = S;
     for (let i = 0; i < 5; i++) U.uT.value[i] = target5[i];
-    U.uBlend.value = fresh || !this.lut ? 0 : 1; U.tPrev.value = this.lut || this.cpu;
+    U.uBlend.value = fresh || !this.lut ? 0 : 1; U.tPrev.value = this.lut || this.cpu; U.uRate.value = rate;
     r.setRenderTarget(out); this.quad.render(r);
     this.lut = out.texture;
   }
@@ -730,12 +730,12 @@ export class Pipeline {
       const G = this.gpuLevels;
       // a curve the CPU solved (a still, the first frame) is where the next GPU solve blends from, as the read-back's did
       if (this._lv?.cpu) { G.setCurve(this._lv.v); this._lv = { frame, gpu: true }; }
-      if (!this._lv || ((this._lvTick = (this._lvTick || 0) + 1) % (this.levelsEvery || 20)) === 0) {
+      if (!this._lv || ((this._lvTick = (this._lvTick || 0) + 1) % (this.levelsEveryGpu || this.levelsEvery || 20)) === 0) {
         U.uLevelsOn.value = 0;
         this.quad.material = this.gradeMat;
         this._lvTarget();
         r.setRenderTarget(this.lvRT); this.quad.render(r);
-        G.solve(this.lvRT, GRADE.uLevelTarget.value, S, !this._lv);
+        G.solve(this.lvRT, GRADE.uLevelTarget.value, S, !this._lv, this.levelsRate ?? 0.35);
         this._lv = { frame, gpu: true };
       }
       U.tLut.value = G.lut; U.uLutTex.value = 1; U.uLevelsOn.value = 1;

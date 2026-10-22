@@ -113,8 +113,10 @@ export class Lighting {
     this._syncSkyUniforms();
   }
 
-  /** per-subframe update; jitter (0..1 pair) samples the sun disk for soft shadows */
-  update(jitter = null) {
+  /** per-subframe update; jitter (0..1 pair) samples the sun disk for soft shadows. advance = false (a realtime frame,
+   *  nothing accumulated): the per-sample offsets of the volumetrics' and the shadow taps' noise stay as they are, so
+   *  they do not change from frame to frame (they decorrelate samples that are averaged; alone they only flicker) */
+  update(jitter = null, advance = true) {
     const d = SUN.dir.clone();
     if (jitter) {
       const t1 = new THREE.Vector3(), t2 = new THREE.Vector3();
@@ -126,6 +128,7 @@ export class Lighting {
     this.csm.lightDirection.copy(d).negate();
     this.csm.update();
     // volumetrics decorrelate their ray-march jitter per accumulated sub-frame
+    if (!advance) { this.updateLens(); return; }
     SKY.uFrame.value = (SKY.uFrame.value + 1) % 4096;
     const f = SKY.uFrame.value;
     SHADOW_JITTER.value.set((f * 37) % 61 + (f % 7) * 0.37, (f * 23) % 59 + (f % 5) * 0.61);

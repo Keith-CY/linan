@@ -178,6 +178,7 @@ void main() {
 const RIDGE_FRAG = INK_COMMON + /* glsl */`
 uniform sampler2D tA;
 uniform float uWaterSteps;
+uniform float uLive;   // the walking painting: the base of the mass to the pixel (see below)
 varying vec2 vUv;
 //   r = px (sheet) below the ridge of the range this pixel belongs to (999: none in reach)
 //   g = px (sheet) above the base of the mass (where a nearer form, water or the frame edge cuts it)
@@ -223,10 +224,24 @@ void main() {
   float base = 999.0, layer = 999.0;
   for (int i = 1; i <= 60; i++) {
     float y = fc.y - float(i) * stepPx;
-    if (y <= 0.0) { if (base > 998.0) base = float(i) * stepPx / uK; break; }
+    // (the walking painting: the frame's edge is no base, and a nearer form's edge is found to the pixel. The ink that
+    // gathers at a base, laid along the bottom of the frame, is fixed to the screen: the ground slid under it and the
+    // edges of its washes swept over the ground; in whole steps the foot of every mass moved in jumps)
+    if (y <= 0.0) { if (base > 998.0 && uLive < 0.5) base = float(i) * stepPx / uK; break; }
     vec4 b = texelFetch(tA, ivec2(vec2(fc.x, y) * uGs), 0);
     int cb = int(b.w + 0.5);
-    if (base > 998.0 && (cb == C_WATER || b.z < D * 0.9 - 4.0)) base = float(i) * stepPx / uK;
+    if (base > 998.0 && (cb == C_WATER || b.z < D * 0.9 - 4.0)) {
+      base = float(i) * stepPx / uK;
+      if (uLive > 0.5) {
+        float lo = float(i - 1) * stepPx, hi = float(i) * stepPx;
+        for (int k = 0; k < 3; k++) {
+          float mid = 0.5 * (lo + hi);
+          vec4 m = texelFetch(tA, ivec2(vec2(fc.x, fc.y - mid) * uGs), 0);
+          if (int(m.w + 0.5) == C_WATER || m.z < D * 0.9 - 4.0) hi = mid; else lo = mid;
+        }
+        base = hi / uK;
+      }
+    }
     // the layer below: water, or a form much nearer (a gap between two layers of the view, where mist can lie);
     // the frame's edge is not one (the nearest masses run on out of the picture)
     // (only land, trees or water make a layer: a pagoda or a hall standing in front of a hillside is no gap for mist)
@@ -296,6 +311,8 @@ uniform vec3 uSunW;     // direction to the sun (world)
 uniform float uFrame;
 uniform vec3 uOrg, uOrgRel;   // the point the G-buffer measured the origins (tC) from, and it minus the camera (src/ink/gbuffer.js)
 uniform float uProj;          // the tour video: lattices projected from the segment's viewpoint (uOrg)
+uniform mat4 uPrevVP;         // the tour video: the camera a frame earlier (view-projection), for how far a point travels
+uniform float uPrevOn;        //   on the sheet in a frame (prevPx); 0: unknown
 uniform float uMotion;        // a moving picture (the tour video, the walking painting): marks fade in and out instead of switching
 // where the painter puts the ink. Two foci (screen uv, radius as a fraction of the height, floor of the falloff)
 uniform vec4 uFocus0, uFocus1;
@@ -469,11 +486,20 @@ float streakLevel(vec2 q, vec2 dsl, float S, float dens, float kind, float lev) 
   return c;
 }
 // a fine horizontal hatching for the tour video's ground (q: sheet px as seen from the segment's viewpoint): rows ~2.2 px
-// apart, each broken into dashes of its own darkness (a still gets its hatching from one-pixel stripes, see below)
-float hatchRows(vec2 q) {
+// apart, each broken into dashes of its own darkness (a still gets its hatching from one-pixel stripes, see below).
+// k: how much of the rows themselves is drawn; where the ground slides by more than a fraction of a row in a frame the
+// rows strobe (a pixel dark, light, dark from frame to frame) and give way to their mean (0.68 of the dash), as a
+// longer exposure would blur them
+float hatchRows(vec2 q, float k) {
   float r = q.y / 2.2, ri = floor(r), f = r - ri;
   float a = vnoise2(vec2(q.x / 55.0 + ri * 0.37, ri * 0.73)) * 0.7 + vnoise2(vec2(q.x / 17.0, ri * 1.31 + 9.0)) * 0.3;
-  return (1.0 - smoothstep(0.18, 0.5, abs(f - 0.5))) * smoothstep(0.3, 0.75, a);
+  return mix(0.68, 1.0 - smoothstep(0.18, 0.5, abs(f - 0.5)), k) * smoothstep(0.3, 0.75, a);
+}
+// how far (output px) the world point P travelled on the sheet since the previous frame (the tour video; 0 unknown)
+float prevPx(vec3 P, vec2 fc) {
+  if (uPrevOn < 0.5) return 0.0;
+  vec4 q = uPrevVP * vec4(P, 1.0);
+  return q.w > 0.0 ? length((q.xy / q.w * 0.5 + 0.5) * uRes - fc) : 1e3;
 }
 float cunStrokes(vec3 P, vec3 Nw, float fp, float dens, float kind) {
   vec3 an = abs(Nw);
@@ -1094,7 +1120,8 @@ void main() {
       patchN = lodNoise(vec3(pq.x, 0.0, pq.y * 1.5) + 31.0, 260.0);
       p2 = smoothstep(0.35, 0.75, lodNoise(vec3(pq.x, 0.0, pq.y * 2.5) + 57.0, 90.0));
       st = streakLevel(pq, vec2(1.0, 0.0), 40.0, 0.16, 1.0, 5.0);
-      float hatch = hatchRows(pq);
+      // (the rows' own travel in a frame: in rows, through the viewpoint's sheet scale against the eye's)
+      float hatch = hatchRows(pq, 1.0 - smoothstep(0.25, 0.5, prevPx(P, fc) / (2.2 * uK * max(length(V) / max(length(P - uCamPos), 1e-3), 0.01))));
       patchN = mix(patchN, 0.3 + 0.65 * hatch * (0.6 + 0.8 * smoothstep(0.25, 0.75, patchN)), 0.85);
     } else if (uMotion > 0.5) {
       // the walking painting: the foreshortening quantised to powers of two and blended (applied directly, as a still
@@ -1410,6 +1437,9 @@ void main() {
     float px = fp * uK;
     vein = smoothstep(px * 1.1, px * 0.3, r * sin(dA)) * smoothstep(px * 4.0, px * 10.0, r) * (1.0 - smoothstep(uNear * 0.8, uNear * 2.5, D));
     vein *= 0.55 * smoothstep(0.3, 0.55, lodNoise(P + 4.4, fp * 25.0 * uK));
+    // (the tour video: a leaf sliding by more than a few px a frame strobes its fine veins; they give way as a long
+    // exposure would blur them)
+    vein *= 1.0 - smoothstep(1.5, 4.0, prevPx(P, fc));
   }
 
   // ---------------- water: blank paper with sparse ripple lines
@@ -1889,7 +1919,7 @@ export class InkPainter {
     this.edgeMat = mk(EDGE_FRAG, { tA: { value: null }, tB: { value: null }, uLine: { value: new THREE.Vector4(40, 2600, 1, 0) } });
     this.jfaInit = mk(JFA_INIT, { tEdge: { value: null } });
     this.jfaStep = mk(JFA_STEP, { tSrc: { value: null }, uStep: { value: 1 } });
-    this.ridgeMat = mk(RIDGE_FRAG, { tA: { value: null }, uWaterSteps: { value: 40 } });
+    this.ridgeMat = mk(RIDGE_FRAG, { tA: { value: null }, uWaterSteps: { value: 40 }, uLive: { value: 0 } });
     this.lightMat = mk(LIGHT_FRAG, { tA: { value: null }, tB: { value: null }, uSunI: { value: 1 } });
     this.downMat = new THREE.ShaderMaterial({ uniforms: { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } }, vertexShader: VERT, fragmentShader: DOWN_FRAG, depthTest: false, depthWrite: false });
     this.blurMat = new THREE.ShaderMaterial({ uniforms: { tSrc: { value: null }, uDir: { value: new THREE.Vector2() } }, vertexShader: VERT, fragmentShader: BLUR_FRAG, depthTest: false, depthWrite: false });
@@ -1907,7 +1937,7 @@ export class InkPainter {
       pInk: v3(PIGMENT.ink), pZhe: v3(PIGMENT.zheshi), pHua: v3(PIGMENT.huaqing), pTeng: v3(PIGMENT.tenghuang), pZhu: v3(PIGMENT.zhusha),
       bShiqing: v3(PIGMENT.shiqing), bShilv: v3(PIGMENT.shilv), bZhusha: v3(PIGMENT.zhushaBody),
       tPaper: f(null), uPaperTex: f(0), uGrazeFix: f(0), uGrazeW: f(0), tSmoke: f(null), uSmokeOn: f(0),
-      uOrg: v3([0, 0, 0]), uOrgRel: v3([0, 0, 0]), uMotion: f(0), uProj: f(0),
+      uOrg: v3([0, 0, 0]), uOrgRel: v3([0, 0, 0]), uMotion: f(0), uProj: f(0), uPrevVP: { value: new THREE.Matrix4() }, uPrevOn: f(0),
       uLook: { value: new THREE.Vector4(0, 1, 1, 0) }, uLook2: { value: new THREE.Vector4(1, 1, 0, 0) }, uLook3: { value: new THREE.Vector4() }, uLook4: { value: new THREE.Vector4() }, uLook5: { value: new THREE.Vector4(0, 1, 0, 0) }, uLook6: { value: new THREE.Vector4() }, uBoreInk: { value: new THREE.Vector4() }, uBoreInk2: { value: new THREE.Vector4() }, uInkTint: v3([1, 1, 1]), uSkyTint: { value: new THREE.Vector4() }, uMoonCol: { value: new THREE.Vector4() }, uLampMirror: { value: 1 },
     });
     // the paper is fixed to the sheet: realtime painting (cachePaper = true) renders it once per size / style
@@ -2005,6 +2035,8 @@ export class InkPainter {
     this.paintMat.uniforms.uOrgRel.value.copy(this.paintMat.uniforms.uOrg.value).sub(camP);
     this.paintMat.uniforms.uMotion.value = extra.motion ? 1 : 0;
     this.paintMat.uniforms.uProj.value = extra.motion && extra.org ? 1 : 0;
+    this.paintMat.uniforms.uPrevOn.value = extra.prevVP ? 1 : 0;
+    if (extra.prevVP) this.paintMat.uniforms.uPrevVP.value.copy(extra.prevVP);
     // tone blurs: ½ res (≈3 px) and ⅛ res (≈16 px)
     this._down(this.toneRT.texture, this.w, this.h, this.half0);
     this._blur(this.half0, this.half1, 1.0);
@@ -2029,6 +2061,7 @@ export class InkPainter {
     // ridge distance
     this.ridgeMat.uniforms.tA.value = tA;
     this.ridgeMat.uniforms.uWaterSteps.value = this.cachePaper ? 40 : 80;
+    this.ridgeMat.uniforms.uLive.value = this.cachePaper ? 1 : 0;
     this._pass(this.ridgeMat, this.ridgeRT);
     // light on the form
     this.lightMat.uniforms.tA.value = tA; this.lightMat.uniforms.tB.value = tB; this.lightMat.uniforms.uSunI.value = extra.sunI;
