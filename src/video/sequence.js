@@ -14,7 +14,13 @@
 export const FPS = 30;
 export const XFADE = 1.2;      // seconds of cross-dissolve between consecutive segments
 export const SHUTTER = 0.5;    // 180° shutter for the photographic look (frames)
-export const INK_SHUTTER = 0.5; // the ink look's: its tone samples and its paintings spread over half a frame (player.js)
+// the ink look's exposure (player.js): its tone samples and its paintings spread over a tent of this support (frames)
+// about each frame, each painting blurred over its own share of it. With a box of half a frame (or a whole one) a brush
+// line or a leaf's vein that travels farther than its own width in a frame is in a pixel in one frame and gone in the
+// next: the fine work of a moving shot strobes. A tent three frames wide overlaps its neighbours, so what passes a pixel
+// fades in and out over three frames (two left the near lotus and the hall's railings in a fast truck still popping:
+// a fine pattern whose travel per frame is near its own period keeps a fifth of its contrast through a tent of two)
+export const INK_SHUTTER = 3.0;
 
 export const SEQUENCE = [
   // 西湖全景 (spring): opens on the painting itself, then drifts in over the lake past the 樓閣

@@ -13,7 +13,8 @@
 //   --paints N      ink look: each frame the mean of N paintings, each at its own instant of the shutter interval and its
 //                   own sub-pixel offset of the camera (default 16; steadies the strokes over fine detail in motion and
 //                   blurs them along it; 1 = one painting, as a still)
-//   --shutter S     the shutter interval in frames (default src/video/sequence.js: 0.5 for both looks; 0 = one instant)
+//   --shutter S     the shutter in frames (default src/video/sequence.js: a box of 0.5 for the photographic look, a tent
+//                   3 frames wide for the ink look; 0 = one instant)
 //   --time-scale K  how fast the engine time (wind in the trees, water, clouds) runs within a segment (default 1;
 //                   0 = each place a frozen moment)
 //   --rest MS       idle after each frame (default 1500; GPU thermals on a shared machine)

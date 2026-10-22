@@ -3,13 +3,14 @@
 //   window.__renderVideoFrame(seg, frame, spp, ts, { wm, timeScale, paints, shutter })  → PNG data URL of that frame
 // Each frame accumulates `spp` jittered samples (AA, soft shadows) like an offline still (src/core/engine.js
 // renderStill), spread over the shutter interval (camera and animation time: motion blur; SHUTTER, INK_SHUTTER in
-// src/video/sequence.js, or { shutter } in frames).
+// src/video/sequence.js, or { shutter } in frames): a box for the photographic look, a tent for the ink look.
 // Ink look (?look=ink): the accumulated frame is the painting's tone, then the painter (src/ink/index.js) paints it like a
 // still, `paints` times, each painting at its own instant of the shutter interval and its own sub-pixel offset of the
 // camera (its G-buffer, the edges, classes and depth the strokes are drawn from, rendered there); the frame is their mean.
 // One painting is crisp as a still, but its strokes over sub-pixel detail flip on and off from frame to frame as the
 // camera moves, and over a fast foreground every crisp mark jumps a whole frame's travel at once (a strobe); the mean
-// over the shutter holds them steady and blurs them along their motion as a film camera would.
+// over the shutter holds them steady and blurs them along their motion as a film camera would. Each painting is blurred
+// over its own share of the shutter (SLICE_FRAG below), so the mean is one continuous exposure, not n separate copies.
 // The camera moves are relative to the viewpoint's camera as applyShot leaves it (in the ink look the ink camera). The
 // painter keeps its lattices and foci anchored to that viewpoint (engine.shot); the G-buffer measures the objects'
 // origins from it (src/ink/gbuffer.js: measured from the moving camera in half floats they jittered by centimetres a
@@ -19,6 +20,7 @@
 // { wm: true } stamps the watermark (src/explore/watermark.js) into the frame; { timeScale } scales the engine time's
 // advance within a segment (0 = a frozen moment: no wind in the trees, no waves).
 import * as THREE from 'three';
+import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { FPS, XFADE, SHUTTER, INK_SHUTTER, SEQUENCE, cameraAt } from './sequence.js';
 
 // sub-pixel offsets (output pixels) of the paintings: one centred, a rotated grid of four, else Halton points
@@ -31,14 +33,48 @@ function paintOffsets(n) {
   return o.map(([x, y]) => [x - mx, y - my]);
 }
 const gcd = (a, b) => (b ? gcd(b, a % b) : a);
-/** the k-th of n instants (in frames, about the frame's own) stratified over the shutter interval, visited in a
- *  scrambled order so that a painting's instant and its sub-pixel offset are not tied together */
-function instant(k, n, shutter) {
-  if (n <= 1 || !(shutter > 0)) return 0;
+/** an instant (frames, about the frame's own) for u in (0, 1): spread evenly over a box of width `shutter`, or as a
+ *  tent of support `shutter` (tent: denser at the frame's own instant, overlapping its neighbours') */
+const spread = (u, shutter, tent) => (tent ? (u < 0.5 ? Math.sqrt(2 * u) - 1 : 1 - Math.sqrt(2 - 2 * u)) * 0.5 : u - 0.5) * shutter;
+/** the k-th of n strata of the shutter, visited in a scrambled order so that a painting's instant and its sub-pixel
+ *  offset are not tied together: [start, instant, end] (frames, about the frame's own; the instant is the stratum's
+ *  middle, the painting is blurred over the rest, see SLICE_FRAG) */
+function stratum(k, n, shutter, tent) {
+  if (n <= 1 || !(shutter > 0)) return [0, 0, 0];
   let s = Math.max(1, Math.round(n * 0.38));
   while (gcd(s, n) !== 1) s++;
-  return ((((k * s) % n) + 0.5) / n - 0.5) * shutter;
+  const j = (k * s) % n;
+  return [spread(j / n, shutter, tent), spread((j + 0.5) / n, shutter, tent), spread((j + 1) / n, shutter, tent)];
 }
+// Each painting stands for its stratum of the shutter: it is blurred along the path every pixel's world point takes
+// over that stratum (from the G-buffer's depth, projected with the cameras at the stratum's start and end). The mean of
+// the paintings is then a continuous exposure. Without it a mark that travels farther than its own width between two
+// paintings' instants is laid down as separate copies, a different set every frame: in a fast shot (the lotus field,
+// the near ground) every fine line and edge pops.
+const SLICE_TAPS = 12;
+const SLICE_FRAG = /* glsl */`
+  precision highp float;
+  uniform sampler2D tSrc, tA; uniform vec2 uRes, uGRes; uniform mat4 uInvProj, uCamWorld, uVP0, uVP1;
+  in vec2 vUv; out vec4 o;
+  vec2 toPx(mat4 m, vec3 P) { vec4 q = m * vec4(P, 1.0); return (q.xy / max(q.w, 1e-4) * 0.5 + 0.5) * uRes; }
+  void main() {
+    float D = texelFetch(tA, clamp(ivec2(vUv * uGRes), ivec2(0), ivec2(uGRes) - 1), 0).z;
+    vec4 v = uInvProj * vec4(vUv * 2.0 - 1.0, 1.0, 1.0); vec3 r = v.xyz / v.w;
+    vec3 Pw = (uCamWorld * vec4(r * (min(D, 40000.0) / -r.z), 1.0)).xyz;
+    vec2 p = vUv * uRes, a = toPx(uVP0, Pw) - p, b = toPx(uVP1, Pw) - p;
+    // (a, b: where this pixel's point lies at the stratum's ends, about where it lies now; what the pixel saw over the
+    // stratum is what now lies the opposite way)
+    float len = length(b - a);
+    if (!(len > 0.25) || len > 200.0) { o = texture(tSrc, vUv); return; }
+    int n = int(clamp(ceil(len * 1.5), 2.0, float(${SLICE_TAPS})));
+    vec4 c = vec4(0.0);
+    for (int i = 0; i < ${SLICE_TAPS}; i++) {
+      if (i >= n) break;
+      vec2 d = mix(a, b, (float(i) + 0.5) / float(n));
+      c += texture(tSrc, (p - d) / uRes);
+    }
+    o = c / float(n);
+  }`;
 
 export function setupVideo(engine, SHOTS) {
   const shotById = (id) => SHOTS.find((s) => String(s.id) === String(id));
@@ -63,6 +99,20 @@ export function setupVideo(engine, SHOTS) {
     engine.setTime(seg.time + t * timeScale + timeShift); // timeShift: retry knob for a frame that hung the GPU
     engine.lighting.refreshCSM();
   };
+  // the camera at t seconds into the segment (view-projection, with a sub-pixel offset ox, oy in px) into m
+  const vpCam = new THREE.PerspectiveCamera();
+  const vpAt = (seg, t, m, ox = 0, oy = 0) => {
+    const c = cameraAt(base, seg, t / seg.dur);
+    vpCam.fov = c.fov; vpCam.aspect = cam.aspect; vpCam.near = cam.near; vpCam.far = cam.far;
+    vpCam.position.set(...c.pos); vpCam.up.set(0, 1, 0); vpCam.lookAt(c.target[0], c.target[1], c.target[2]);
+    if (base.roll) vpCam.rotateZ((base.roll * Math.PI) / 180);
+    vpCam.updateProjectionMatrix(); vpCam.updateMatrixWorld(true);
+    const P = vpCam.projectionMatrix.elements;
+    P[8] += (2 * ox) / engine.width; P[9] += (2 * oy) / engine.height;
+    return m.multiplyMatrices(vpCam.projectionMatrix, vpCam.matrixWorldInverse);
+  };
+  // the camera a frame before t: the painter measures how far a point travels on the sheet in a frame (painter.js prevPx)
+  const prevVP = (seg, t) => vpAt(seg, t - 1 / FPS, (engine.ink.prevVP ||= new THREE.Matrix4()));
   const fence = async () => {
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
     gl.flush();
@@ -77,7 +127,7 @@ export function setupVideo(engine, SHOTS) {
     engine.pipeline.begin();
     let last = null;
     for (let i = 0; i < spp; i++) {
-      const ti = t + (shutter * ((i + 0.5) / spp - 0.5)) / FPS;
+      const ti = t + spread((i + 0.5) / spp, shutter, !!engine.ink) / FPS;
       if (ti !== last) { pose(seg, ti, timeScale, timeShift); last = ti; }
       engine.lighting.updateLens?.();
       engine.renderSample(i, { jitter: spp > 1 });
@@ -130,30 +180,53 @@ export function setupVideo(engine, SHOTS) {
       const m = await import('../explore/watermark.js');
       return await m.stampDataURL(url, { night: !!engine.registry.night });
     } finally {
-      if (ink) { ink.anchor = null; ink.motion = false; engine.pipeline.gradeHeld = false; }
+      if (ink) { ink.anchor = null; ink.motion = false; ink.prevVP = null; engine.pipeline.gradeHeld = false; }
     }
   };
 
   // the mean of n paintings, each at its own instant of the shutter and its own sub-pixel offset → PNG data URL
-  let rt = null, sum = null, buf = null, cv = null, measureRT = null;
+  let rt = null, rt2 = null, sum = null, buf = null, cv = null, measureRT = null;
+  const sliceOn = new URLSearchParams(location.search).get('slice') !== '0';   // ?slice=0: no blur over the strata
+  const sliceMat = new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    uniforms: { tSrc: { value: null }, tA: { value: null }, uRes: { value: new THREE.Vector2() }, uGRes: { value: new THREE.Vector2() },
+      uInvProj: { value: new THREE.Matrix4() }, uCamWorld: { value: new THREE.Matrix4() }, uVP0: { value: new THREE.Matrix4() }, uVP1: { value: new THREE.Matrix4() } },
+    vertexShader: 'out vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: SLICE_FRAG, depthTest: false, depthWrite: false,
+  });
+  const sliceQuad = new FullScreenQuad(sliceMat);
   async function paintMean(seg, frame, n, shutter, timeScale, timeShift, wm) {
     const W = engine.width, H = engine.height, r = engine.renderer;
     if (!rt || rt.width !== W || rt.height !== H) {
-      rt?.dispose();
-      rt = new THREE.WebGLRenderTarget(W, H, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace,
-        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false, stencilBuffer: false, generateMipmaps: false });
+      rt?.dispose(); rt2?.dispose();
+      const o = { type: THREE.UnsignedByteType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace,
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false, stencilBuffer: false, generateMipmaps: false };
+      rt = new THREE.WebGLRenderTarget(W, H, o); rt2 = new THREE.WebGLRenderTarget(W, H, o);
       sum = new Uint16Array(W * H * 4); buf = new Uint8Array(W * H * 4);
     }
     sum.fill(0);
     const offs = paintOffsets(n);
     for (let k = 0; k < n; k++) {
       const [ox, oy] = offs[k];
-      pose(seg, (frame + instant(k, n, shutter)) / FPS, timeScale, timeShift);
+      const [t0, tm, t1] = stratum(k, n, shutter, true);
+      const ti = (frame + tm) / FPS;
+      pose(seg, ti, timeScale, timeShift);
+      prevVP(seg, ti);
       const P = cam.projectionMatrix.elements;
       P[8] += (2 * ox) / W; P[9] += (2 * oy) / H;
       cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
       engine.pipeline.resolve(rt, 0);
-      r.readRenderTargetPixels(rt, 0, 0, W, H, buf);
+      let out = rt;
+      if (t1 > t0 && sliceOn) {
+        const U = sliceMat.uniforms, gb = engine.ink.gbuf;
+        U.tSrc.value = rt.texture; U.tA.value = gb.textures[1];
+        U.uRes.value.set(W, H); U.uGRes.value.set(gb.width, gb.height);
+        U.uInvProj.value.copy(cam.projectionMatrixInverse); U.uCamWorld.value.copy(cam.matrixWorld);
+        vpAt(seg, (frame + t0) / FPS, U.uVP0.value, ox, oy); vpAt(seg, (frame + t1) / FPS, U.uVP1.value, ox, oy);
+        r.setRenderTarget(rt2); sliceQuad.render(r); r.setRenderTarget(null);
+        out = rt2;
+      }
+      r.readRenderTargetPixels(out, 0, 0, W, H, buf);
       for (let i = 0; i < buf.length; i++) sum[i] += buf[i];
     }
     pose(seg, frame / FPS, timeScale, timeShift);
