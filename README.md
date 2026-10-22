@@ -9,7 +9,7 @@ generated procedurally. There are no downloaded models, scans, textures, HDRIs o
 
 ![the ten viewpoints](media/contact.jpg)
 
-**Walk it in your browser: https://linan-7lr.pages.dev** (desktop Chrome, Edge or Safari; about 30 s to load)
+**Walk it in your browser: https://linan.lapla.si** (desktop Chrome, Edge or Safari; about 30 s to load)
 
 Video: [tour](media/tour.mp4) · [walk](media/walk.mp4)
 
