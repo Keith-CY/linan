@@ -1,0 +1,70 @@
+临安 Lin'an — Southern Song Hangzhou and West Lake, built in code
+Copyright (c) 2026 Keith. MIT License (LICENSE).
+
+This project includes code derived from Athenaion
+  https://github.com/Leonxlnx/athenaion  (commit 9b8bd23, October 2026)
+  Copyright (c) 2026 Leon Lin
+  MIT License — the full text is in THIRD_PARTY/athenaion-LICENSE.
+
+Files derived from Athenaion (copied, then changed where noted):
+  index.html, src/main.js, src/test/testScene.js         (titles, default frame size; the boot of the explorable world
+                                                           in index.html and main.js is ours)
+  src/core/engine.js                                      (per-sample jitter of the PCF shadow-tap noise)
+  src/core/lighting.js                                    (shadow-tap radius off when soft shadows accumulate)
+  src/core/atmosphere.js, sky.js, materials.js, glsl.js, noise.js, rng.js,
+           quality.js, cache.js, footprints.js, pipeline.js
+  src/water/surface.js                                    (the two-pass surface, FFT octaves, LEAN roughness, foam texture
+                                                           and premultiplied fog; the lake features are ours: wind patches,
+                                                           multi-tap mirror, unfolded-path haze, glitter, wakes, ice, bore)
+  src/water/spray.js                                      (the spray / mist particle kinds and shading of water/mist.js;
+                                                           the moving frame for the tidal bore is ours)
+  src/water/reflection.js                                 (near-plane clip bias: no underwater geometry in the mirror)
+  src/water/heightmap.js, ocean.js
+  src/water/ground.js                                     (makeGround, taken out of Athenaion's water/trace.js)
+  src/water/flow.js                                       (the flow-map encoding and texture set-up of water/flow.js;
+                                                           the still-lake drift field is ours)
+  src/modules/water.js, src/modules/mist.js               (the module wiring of modules/water.js and the premultiplied
+                                                           atmosphere blending of water/mist.js; the lake, canals,
+                                                           river and mist sheet are ours)
+  src/video/player.js, src/video/sequence.js              (the sequence itself is ours)
+  src/world/index.js, src/world/looks.js                  (module runner and look helpers; the content is ours)
+  src/world/heightfield.js                                (the 2D distance helpers only)
+  tools/render.mjs, session.mjs, snap.mjs, serve.mjs, render-video.mjs, crop.mjs,
+        colorstats.mjs, satstats.mjs, sample.mjs, bake.mjs
+                                                          (macOS Chrome launch, references read from shots.js)
+  src/vegetation/util.js         (GeoBuilder, blob / card / tube / billboard helpers from vegetation/util.js; ribbons are ours)
+  src/vegetation/atlas.js        (the coverage-preserving mip chain and patch stamping from vegetation/atlas.js;
+                                  every drawing is ours)
+  src/vegetation/materials.js    (foliage / bark / impostor / wind-depth shaders from materials/foliage.js and the
+                                  thin-leaf translucency from flora/foliage.js; seasons, snow, ribbons are ours)
+  src/vegetation/system.js       (the per-camera LOD instancing of vegetation/instances.js)
+  src/vegetation/trees.js        (the recursive skeleton → LOD scheme of vegetation/trees.js; species, pine tufts,
+                                  peach blossom are ours)
+  src/vegetation/library.js      (structure of vegetation/library.js)
+  src/vegetation/ground.js       (grass-tuft cards and the vine-over-an-edge idea after flora/ground.js and flora/ivy.js)
+  src/sculpt/sdf.js              (SDF primitives, smooth operators, value noise and the bounded Group from sculpt/sdf.js
+                                  and ruins/sdf.js; the cellular helper with feature offsets is ours)
+  src/sculpt/mesher.js           (surface nets with block-sparse narrow-band sampling, Newton projection and gradient
+                                  normals from sculpt/mesher.js; the SDF ambient-occlusion / cavity bake from
+                                  sculpt/bakeutil.js; clipping for nested regions, the origin offset and aRock are ours)
+  src/sculpt/budai.js            (the modelling technique of sculpt/face.js and sculpt/figure.js: smooth unions of
+                                  ellipsoids and tapered capsules, carved features, the irregular tube-fold field;
+                                  the 布袋弥勒 itself is ours)
+  src/karst/material.js          (STONE_GLSL of materials/stone.js: band-limited fbm, cellular facets and joints,
+                                  surface-gradient bump, crust, pitting, lichen, moss, wetness; carved surfaces,
+                                  rain streaks, snow and the tuff palette are ours)
+  src/karst/rock.js              (createRock of materials/stone.js: fracture-plane hull on an icosphere, joint grooves,
+                                  bedding, Laplacian cavity; the aRock output and the 太湖石 SDF are ours)
+  src/bake/karst.js              (the skip-when-baked pattern of bake/head.js; the worker pool is ours)
+
+Everything else is original to this project, including src/yingzao/ (the 营造法式 generator), src/ink/ (the ink
+painter), src/explore/ (the explorable world), src/city/, src/karst/ (except the parts noted above), src/terrain/,
+src/world/layout.js, src/world/shots.js, the other src/modules/ and the other tools/.
+
+Third-party software used (installed by npm, not included in this repository):
+  three.js        https://threejs.org            MIT License, Copyright © 2010-2026 three.js authors
+  puppeteer-core  https://pptr.dev               Apache License 2.0 (render tools only)
+  pngjs           https://github.com/pngjs/pngjs MIT License (render tools only)
+
+Reference images: refs/refNN.jpg and refs/inkNN.jpg are AI-generated with Qwen-Image 2.1 (Apache-2.0) from the
+prompts in refs/*.json (tools/refs.py). They are comparison targets only; nothing in the world is made from them.

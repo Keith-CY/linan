@@ -1,0 +1,22 @@
+{
+  "name": "linan",
+  "version": "0.1.0",
+  "description": "Southern Song Hangzhou (临安) and West Lake as a walkable world in Chinese ink, built entirely in code with three.js",
+  "license": "MIT",
+  "author": "Keith",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Keith-CY/linan.git"
+  },
+  "homepage": "https://github.com/Keith-CY/linan#readme",
+  "type": "module",
+  "scripts": {
+    "serve": "node tools/serve.mjs",
+    "render": "node tools/render.mjs"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0",
+    "puppeteer-core": "^25.14.0",
+    "three": "^0.186.1"
+  }
+}

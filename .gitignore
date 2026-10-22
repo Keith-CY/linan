@@ -1,0 +1,11 @@
+node_modules/
+out/
+generated/
+refs/candidates/
+refs/ink-candidates/
+refs/ink-preview/
+refs/preview/
+refs/*.log
+.DS_Store
+__pycache__/
+*.pyc

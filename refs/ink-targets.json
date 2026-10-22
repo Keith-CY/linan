@@ -1,0 +1,79 @@
+{
+  "style": "mo",
+  "about": "The ten 纯水墨 ink-painting targets: Qwen-Image 2.1, seed 1103; batch index = which picture of the batch was used. Generated with tools/refs.py --spec <spec> --out refs/ink-candidates.",
+  "targets": {
+    "01": {
+      "image": "refs/ink01.jpg",
+      "spec": "refs/ink-probe.json",
+      "id": "01-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "02": {
+      "image": "refs/ink02.jpg",
+      "spec": "refs/ink-refs-mo.json",
+      "id": "02-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "03": {
+      "image": "refs/ink03.jpg",
+      "spec": "refs/ink-refs-mo.json",
+      "id": "03-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "04": {
+      "image": "refs/ink04.jpg",
+      "spec": "refs/ink-refs-mo.json",
+      "id": "04-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "05": {
+      "image": "refs/ink05.jpg",
+      "spec": "refs/ink-refs-mo.json",
+      "id": "05-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "06": {
+      "image": "refs/ink06.jpg",
+      "spec": "refs/ink-refs-mo.json",
+      "id": "06-mo",
+      "seed": 1103,
+      "batchIndex": 2
+    },
+    "07": {
+      "image": "refs/ink07.jpg",
+      "spec": "refs/ink-refs-mo.json",
+      "id": "07-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "08": {
+      "image": "refs/ink08.jpg",
+      "spec": "refs/ink-probe.json",
+      "id": "08-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "09": {
+      "image": "refs/ink09.jpg",
+      "spec": "refs/ink-refs-mo.json",
+      "id": "09-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    },
+    "10": {
+      "image": "refs/ink10.jpg",
+      "spec": "refs/ink-probe.json",
+      "id": "10-mo",
+      "seed": 1103,
+      "batchIndex": 1
+    }
+  },
+  "notes": {
+    "05": "The target shows many small moons in the water; the world paints one moon reflection stretched vertically."
+  }
+}
