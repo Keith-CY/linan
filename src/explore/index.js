@@ -337,6 +337,8 @@ export async function startExplore(engine, { buildMs }) {
     let vegStep = 0;
     if (veg) { const tv = performance.now(); if (veg.step(3)) S.dirty = Math.max(S.dirty, 1); vegStep = performance.now() - tv; }
     if (veg && moved) { const tv = performance.now(); if (veg.maybeUpdate(engine.camera)) vegMs += performance.now() - tv; veg.farVisibility(engine.camera); }
+    // terrain-occlusion tests left over by the last re-bucket (a budget per re-bucket): the rest, a frame at a time
+    else if (veg?.occPending && ST.phase === 'idle') { const tv = performance.now(); veg.update(engine.camera); vegMs += performance.now() - tv; S.dirty = Math.max(S.dirty, 1); }
     const tC = performance.now();
     // things that follow the traveller: casters in the shadow range, the water region's height map, boats near by
     const pt = S.prof ? {} : null, lap = (k, t) => { if (pt) pt[k] = performance.now() - t; return performance.now(); };

@@ -147,6 +147,127 @@ export function solveToneCurve(buf, t5, s) {
   return out;
 }
 
+/**
+ * The auto levels of the realtime path, measured and solved on the GPU (no read-back): the quarter-size measuring frame
+ * is binned into a 256-bin luminance histogram (one point per pixel, added up in a float target), and one pass solves
+ * the curve exactly as solveToneCurve does (percentiles, slope limits, Fritsch-Carlson tangents, Hermite segments, kept
+ * monotone), blended 0.35 toward the new solve from the previous curve. The grade pass reads the curve from `lut`.
+ * create() → false without float render targets and float blending (the read-back path is kept then).
+ */
+class GpuLevels {
+  static create(renderer) {
+    const gl = renderer.getContext();
+    if (!gl.getExtension('EXT_color_buffer_float') || !gl.getExtension('EXT_float_blend')) return false;
+    return new GpuLevels(renderer);
+  }
+  constructor(r) {
+    this.r = r;
+    const f = (w) => new THREE.WebGLRenderTarget(w, 1, { type: THREE.FloatType, format: THREE.RedFormat, depthBuffer: false, stencilBuffer: false, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, generateMipmaps: false });
+    this.hist = f(256);
+    this.luts = [f(LUT_N + 1), f(LUT_N + 1)];
+    this.cpu = new THREE.DataTexture(new Float32Array(LUT_N + 1), LUT_N + 1, 1, THREE.RedFormat, THREE.FloatType);
+    this.lut = null;
+    this.binMat = new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      uniforms: { tSrc: { value: null }, uW: { value: 1 } },
+      vertexShader: /* glsl */`
+        precision highp float; precision highp int;
+        uniform sampler2D tSrc; uniform int uW;
+        void main() {
+          vec3 c = floor(texelFetch(tSrc, ivec2(gl_VertexID % uW, gl_VertexID / uW), 0).rgb * 255.0 + 0.5);
+          float b = min(255.0, floor(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b + 0.5));
+          gl_Position = vec4((b + 0.5) / 128.0 - 1.0, 0.0, 0.0, 1.0);
+          gl_PointSize = 1.0;
+        }`,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        out vec4 o;
+        void main() { o = vec4(1.0, 0.0, 0.0, 1.0); }`,
+      blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor,
+      depthTest: false, depthWrite: false,
+    });
+    this.points = new THREE.Points(new THREE.BufferGeometry(), this.binMat);
+    this.points.frustumCulled = false;
+    this.scene = new THREE.Scene(); this.scene.add(this.points);
+    this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.solveMat = new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      uniforms: { tHist: { value: null }, tPrev: { value: null }, uN: { value: 1 }, uT: { value: new Float32Array(5) }, uS: { value: 1 }, uBlend: { value: 0 } },
+      vertexShader: 'precision highp float; in vec3 position; void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      fragmentShader: /* glsl */`
+        precision highp float; precision highp int;
+        uniform sampler2D tHist, tPrev; uniform float uN; uniform float uT[5]; uniform float uS; uniform float uBlend;
+        out vec4 o;
+        float pct(float q) {
+          float k = q * uN, c = 0.0;
+          for (int i = 0; i < 256; i++) {
+            float h = texelFetch(tHist, ivec2(i, 0), 0).r;
+            if (c + h >= k) return (float(i) + (k - c) / max(1.0, h) - 0.5) / 255.0;
+            c += h;
+          }
+          return 1.0;
+        }
+        void main() {
+          int jj = int(gl_FragCoord.x);
+          float xs[7], ys[7], d[6], t[7];
+          xs[0] = 0.0; xs[1] = pct(0.02); xs[2] = pct(0.1); xs[3] = pct(0.5); xs[4] = pct(0.9); xs[5] = pct(0.98); xs[6] = 1.0;
+          ys[0] = 0.0; for (int i = 0; i < 5; i++) ys[i + 1] = uT[i] / 255.0; ys[6] = 1.0;
+          for (int i = 1; i < 7; i++) xs[i] = max(xs[i], xs[i - 1] + 0.004);
+          if (xs[6] > 1.0) { float k = 1.0 / xs[6]; for (int i = 0; i < 7; i++) xs[i] *= k; }
+          xs[6] = 1.0;
+          // limit segment slopes (re-target y, keep monotone)
+          for (int i = 1; i < 7; i++) { float dx = xs[i] - xs[i - 1]; ys[i] = min(ys[i - 1] + dx * 2.8, max(ys[i - 1] + dx * 0.35, ys[i])); }
+          if (ys[6] != 1.0) { float k = 1.0 / ys[6]; for (int i = 0; i < 7; i++) ys[i] *= k; }
+          // Fritsch-Carlson tangents
+          for (int i = 0; i < 6; i++) d[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+          t[0] = d[0]; t[6] = d[5];
+          for (int i = 1; i < 6; i++) t[i] = d[i - 1] * d[i] <= 0.0 ? 0.0 : (2.0 * d[i - 1] * d[i]) / (d[i - 1] + d[i]);
+          float run = 0.0;
+          for (int j = 0; j <= ${LUT_N}; j++) {
+            float x = float(j) / ${LUT_N}.0;
+            int i = 0;
+            for (int q = 0; q < 5; q++) if (i < 5 && x > xs[i + 1]) i++;
+            float h = xs[i + 1] - xs[i], u = (x - xs[i]) / h;
+            float h00 = 2.0 * u * u * u - 3.0 * u * u + 1.0, h10 = u * u * u - 2.0 * u * u + u, h01 = -2.0 * u * u * u + 3.0 * u * u, h11 = u * u * u - u * u;
+            float y = h00 * ys[i] + h10 * h * t[i] + h01 * ys[i + 1] + h11 * h * t[i + 1];
+            float v = x + (clamp(y, 0.0, 1.0) - x) * uS;
+            run = j == 0 ? v : max(run, v);
+            if (j == jj) break;
+          }
+          if (uBlend > 0.5) { float p = texelFetch(tPrev, ivec2(jj, 0), 0).r; run = p + (run - p) * 0.35; }
+          o = vec4(run, 0.0, 0.0, 1.0);
+        }`,
+      depthTest: false, depthWrite: false,
+    });
+    this.quad = new FullScreenQuad(this.solveMat);
+  }
+
+  /** a curve solved on the CPU becomes the current one */
+  setCurve(v) { this.cpu.image.data.set(v); this.cpu.needsUpdate = true; this.lut = this.cpu; }
+
+  /** measure lvRT (RGBA8, graded without the levels) and solve; fresh: no blend with the previous curve */
+  solve(lvRT, target5, S, fresh) {
+    const r = this.r, n = lvRT.width * lvRT.height, g = this.points.geometry;
+    if (g.attributes.position?.count !== n) {
+      // (one point per measured pixel; the vertex shader places it from its index: the positions are a draw count)
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n), 1));
+      g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1);
+    }
+    const cc = new THREE.Color(); r.getClearColor(cc); const ca = r.getClearAlpha();
+    this.binMat.uniforms.tSrc.value = lvRT.texture; this.binMat.uniforms.uW.value = lvRT.width;
+    r.setRenderTarget(this.hist); r.setClearColor(0x000000, 0); r.clear(true, false, false);
+    r.render(this.scene, this.cam);
+    r.setClearColor(cc, ca);
+    const out = this.luts[0].texture === this.lut ? this.luts[1] : this.luts[0];
+    const U = this.solveMat.uniforms;
+    U.tHist.value = this.hist.texture; U.uN.value = n; U.uS.value = S;
+    for (let i = 0; i < 5; i++) U.uT.value[i] = target5[i];
+    U.uBlend.value = fresh || !this.lut ? 0 : 1; U.tPrev.value = this.lut || this.cpu;
+    r.setRenderTarget(out); this.quad.render(r);
+    this.lut = out.texture;
+  }
+}
+
 export class Pipeline {
   constructor(renderer, w, h, quality) {
     this.renderer = renderer;
@@ -261,7 +382,7 @@ export class Pipeline {
         tMeter: { value: null }, uMeterOn: { value: 0 },
         tL0: { value: null }, tL2: { value: null }, tL4: { value: null }, uLtmOn: { value: 0 },
         uTx0: { value: new THREE.Vector2() }, uTx2: { value: new THREE.Vector2() }, uTx4: { value: new THREE.Vector2() },
-        uLevelsOn: { value: 0 }, uLut: { value: new Float32Array(LUT_N + 1) },
+        uLevelsOn: { value: 0 }, uLut: { value: new Float32Array(LUT_N + 1) }, tLut: { value: null }, uLutTex: { value: 0 },
         uBloomNorm: { value: 1 / 7 },
         uRes: { value: new THREE.Vector2(w, h) }, uFrame: { value: 0 },
         toneMappingExposure: { value: 1.0 },
@@ -284,13 +405,14 @@ export class Pipeline {
         uniform vec2 uShoulder; uniform float uHighSat;
         uniform float uHueShift[8]; uniform float uHueSat[8]; uniform float uHueLum[8];
         uniform float uLut[${LUT_N + 1}]; uniform float uLevelsOn;
+        uniform sampler2D tLut; uniform float uLutTex;   // the realtime path's curve, solved on the GPU (GpuLevels)
         float luma(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
         // auto tone curve on perceptual luminance (chroma ratios kept, soft gamut squeeze toward white)
         vec3 toneCurve(vec3 o){
           float l = luma(o);
           float x = clamp(l, 0.0, 1.0) * ${LUT_N}.0;
           int i = int(min(floor(x), ${LUT_N - 1}.0));
-          float fl = mix(uLut[i], uLut[i + 1], x - float(i));
+          float fl = uLutTex > 0.5 ? mix(texelFetch(tLut, ivec2(i, 0), 0).r, texelFetch(tLut, ivec2(i + 1, 0), 0).r, x - float(i)) : mix(uLut[i], uLut[i + 1], x - float(i));
           vec3 r = o * (fl / max(l, 1e-4));
           float mx = max(max(r.r, r.g), r.b);
           if (mx > 1.0) r = mix(vec3(fl), r, (1.0 - fl) / max(mx - fl, 1e-4));
@@ -513,6 +635,16 @@ export class Pipeline {
   }
 
   /** bloom + grade + output to the canvas (or a target) */
+  /** the quarter-size target the auto levels measure */
+  _lvTarget() {
+    const qw = Math.max(16, Math.floor(this.w / 4)), qh = Math.max(16, Math.floor(this.h / 4));
+    if (!this.lvRT || this.lvRT.width !== qw || this.lvRT.height !== qh) {
+      this.lvRT?.dispose();
+      this.lvRT = new THREE.WebGLRenderTarget(qw, qh, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace, depthBuffer: false });
+      this.lvBuf = new Uint8Array(qw * qh * 4);
+    }
+  }
+
   resolve(target = null, frame = 0) {
     const r = this.renderer;
     const bloom = this.quality.bloom ? this._bloom() : this.hdr;
@@ -588,8 +720,23 @@ export class Pipeline {
     }
     // r5 auto tone curve: grade at 1/4 res without it, measure luminance percentiles, solve the curve
     const S = GRADE.uAutoLevels.value;
-    const keepLevels = this.realtime && this._lv && S > 0 && ((this._lvTick = (this._lvTick || 0) + 1) % (this.levelsEvery || 20)) !== 0;
-    if (keepLevels) { U.uLut.value.set(this._lv.v); U.uLevelsOn.value = 1; }
+    U.uLutTex.value = 0;
+    // realtime with float blending: measured and solved on the GPU (GpuLevels: the read-back of the asynchronous path
+    // stalled the page 30-700 ms every levelsEvery frames, ANGLE waiting for every queued frame before handing it over)
+    if (S > 0 && this.realtime && this.gpuLevels !== false && (this.gpuLevels ||= GpuLevels.create(r))) {
+      const G = this.gpuLevels;
+      // a curve the CPU solved (a still, the first frame) is where the next GPU solve blends from, as the read-back's did
+      if (this._lv?.cpu) { G.setCurve(this._lv.v); this._lv = { frame, gpu: true }; }
+      if (!this._lv || ((this._lvTick = (this._lvTick || 0) + 1) % (this.levelsEvery || 20)) === 0) {
+        U.uLevelsOn.value = 0;
+        this.quad.material = this.gradeMat;
+        this._lvTarget();
+        r.setRenderTarget(this.lvRT); this.quad.render(r);
+        G.solve(this.lvRT, GRADE.uLevelTarget.value, S, !this._lv);
+        this._lv = { frame, gpu: true };
+      }
+      U.tLut.value = G.lut; U.uLutTex.value = 1; U.uLevelsOn.value = 1;
+    } else if (this.realtime && this._lv && S > 0 && ((this._lvTick = (this._lvTick || 0) + 1) % (this.levelsEvery || 20)) !== 0) { U.uLut.value.set(this._lv.v); U.uLevelsOn.value = 1; }
     else if (S > 0 && this.realtime && this._lv && !this._lvBusy) {
       // realtime: read the measuring frame back asynchronously (a synchronous read waits for every queued frame)
       U.uLevelsOn.value = 0;
@@ -607,20 +754,16 @@ export class Pipeline {
       U.uLevelsOn.value = 1;
     } else if (S > 0 && this.realtime && this._lv) { U.uLut.value.set(this._lv.v); U.uLevelsOn.value = 1; }
     else if (S > 0) {
-      const qw = Math.max(16, Math.floor(this.w / 4)), qh = Math.max(16, Math.floor(this.h / 4));
-      if (!this.lvRT || this.lvRT.width !== qw || this.lvRT.height !== qh) {
-        this.lvRT?.dispose();
-        this.lvRT = new THREE.WebGLRenderTarget(qw, qh, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace, depthBuffer: false });
-        this.lvBuf = new Uint8Array(qw * qh * 4);
-      }
+      this._lvTarget();
+      const qw = this.lvRT.width, qh = this.lvRT.height;
       U.uLevelsOn.value = 0;
       this.quad.material = this.gradeMat;
       r.setRenderTarget(this.lvRT); this.quad.render(r);
       r.readRenderTargetPixels(this.lvRT, 0, 0, qw, qh, this.lvBuf);
       let v = solveToneCurve(this.lvBuf, GRADE.uLevelTarget.value, S);
       const prev = this._lv;
-      if (prev && (frame === prev.frame + 1 || this.realtime)) v = v.map((x, i) => prev.v[i] + (x - prev.v[i]) * (this.realtime ? 0.35 : 0.2)); // video / realtime: smooth
-      this._lv = { frame, v };
+      if (prev?.v && (frame === prev.frame + 1 || this.realtime)) v = v.map((x, i) => prev.v[i] + (x - prev.v[i]) * (this.realtime ? 0.35 : 0.2)); // video / realtime: smooth
+      this._lv = { frame, v, cpu: true };
       U.uLut.value.set(v);
       U.uLevelsOn.value = 1;
     } else U.uLevelsOn.value = 0;

@@ -224,6 +224,7 @@ export class VegSystem {
   update(camera = this.engine.camera) {
     this._token = (this._token || 0) + 1;     // a re-bucket in slices (updateSliced) still running gives up
     this._occBudget = OCC_BUDGET;
+    this.occPending = false;                  // (set when tests were left for later: src/explore re-buckets again)
     const t0 = performance.now();
     const resK = clamp((this.engine.height || 928) / 928, 1, 2.4);
     // still mode: the stills' own (high quality) budget
@@ -550,14 +551,16 @@ export class VegSystem {
    * explore: the terrain occlusion of one plant (7 height samples), re-tested once the camera is 25 m from where it was
    * last tested, at most OCC_BUDGET tests per re-bucket (every plant tested at once, as before, was a 20-70 ms frame in
    * the forests every 25 m); a plant not yet tested counts as visible, one waiting for its re-test keeps its last answer
+   * (occPending: the explorable world re-buckets on the following frames until every test is in)
    */
   _occCached(v, i, cx, cy, cz, x, y, z) {
     if (!v.occV) { v.occV = new Uint8Array(v.n); v.occP = new Float32Array(v.n * 3); }
     const st = v.occV[i], P = v.occP;
     if (st) {
       const dx = cx - P[i * 3], dz = cz - P[i * 3 + 2];
-      if ((dx * dx + dz * dz < 625 && Math.abs(cy - P[i * 3 + 1]) < 10) || this._occBudget <= 0) return st === 2;
-    } else if (this._occBudget <= 0) return false;
+      if (dx * dx + dz * dz < 625 && Math.abs(cy - P[i * 3 + 1]) < 10) return st === 2;
+      if (this._occBudget <= 0) { this.occPending = true; return st === 2; }
+    } else if (this._occBudget <= 0) { this.occPending = true; return false; }
     this._occBudget--;
     const occ = this.occluded(cx, cy, cz, x, y, z);
     v.occV[i] = occ ? 2 : 1; P[i * 3] = cx; P[i * 3 + 1] = cy; P[i * 3 + 2] = cz;
