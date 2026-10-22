@@ -340,6 +340,7 @@ uniform vec4 uLook5;                // (sun glow: a low sun's warm halo in the s
                                     //   with sparse course hints (ink06); a paler ground with light grass strokes (ink02))
 uniform vec3 uInkTint;              // multiplies the ink's absorbance (1 = neutral carbon ink; a night painting bluer)
 uniform vec4 uSkyTint;              // the sky's colour (absorbance) and amount, deeper toward the zenith, clouds left paper
+uniform float uLampMirror;          // night: the lit openings' reflections from the G-buffer (1) or the photograph (0)
 uniform vec4 uMoonCol;              // night: (the moon's one broken column on the water, half width at the horizon (rad),
                                     //   widening per radian below it, lantern glints)
 // pigments
@@ -1175,10 +1176,13 @@ void main() {
       glint = smoothstep(0.42, 0.7, tS) * (1.0 - core) * g2 * uMoonCol.w;
       // the lanterns' reflections from the G-buffer (not the photograph's glitter): this water pixel mirrored
       // about the waterline above it (the shore / object base, RG.b px up) lands on a lit opening → a small glint,
-      // stretched down the water and broken by the ripples into two or three dashes
+      // stretched down the water and broken by the ripples into two or three dashes. Made for 三潭's lantern holes
+      // (uLampMirror 1, the look's viewpoint); a lit window elsewhere is a whole bay, and its mirror image was a square
+      // block of dashes: away from the viewpoint (uLampMirror 0, src/explore/index.js) the lit windows' reflections
+      // are the photograph's columns of glitter below them, broken into horizontal strokes as the moon's path is
       if (uLook3.y > 0.0) {
-        glint = 0.0;
-        if (RG.b < 240.0) {
+        float mirror = 0.0, cols = 0.0;
+        if (uLampMirror > 0.0 && RG.b < 240.0) {
           float wob = (lodNoise(vec3(dot(P, uAxisR) * 0.6, 0.0, dot(P, uAxisF) * 5.0) + 2.0, fp * 4.0 * uK) - 0.5) * 3.0 * uK;
           float hit = 0.0;
           for (int k = -2; k <= 2; k++) {
@@ -1187,8 +1191,13 @@ void main() {
             if (mc == C_GLOW) hit = max(hit, 1.0 - abs(float(k)) * 0.2);
           }
           float dash = smoothstep(0.4, 0.55, lodNoise(vec3(dot(P, uAxisR) * 0.3, 0.0, dot(P, uAxisF) * 2.2) + 7.0, fp * 6.0 * uK));
-          glint = hit * mix(dash, 1.0, 0.35) * uMoonCol.w;
+          mirror = hit * mix(dash, 1.0, 0.35) * uMoonCol.w;
         }
+        if (uLampMirror < 1.0) {
+          float rowsL = lodNoise(vec3(dot(P, uAxisR) * 0.12, 0.0, dot(P, uAxisF) * 1.4) + 5.0, fp * 3.0 * uK);
+          cols = smoothstep(0.1, 0.22, tB) * (1.0 - core) * smoothstep(0.58, 0.68, rowsL) * uMoonCol.w;
+        }
+        glint = mix(cols, mirror, uLampMirror);
       }
     }
     float nearW = 1.0 - smoothstep(30.0, 600.0, D);
@@ -1838,7 +1847,7 @@ export class InkPainter {
       pInk: v3(PIGMENT.ink), pZhe: v3(PIGMENT.zheshi), pHua: v3(PIGMENT.huaqing), pTeng: v3(PIGMENT.tenghuang), pZhu: v3(PIGMENT.zhusha),
       bShiqing: v3(PIGMENT.shiqing), bShilv: v3(PIGMENT.shilv), bZhusha: v3(PIGMENT.zhushaBody),
       tPaper: f(null), uPaperTex: f(0), uGrazeFix: f(0), uGrazeW: f(0), tSmoke: f(null), uSmokeOn: f(0),
-      uLook: { value: new THREE.Vector4(0, 1, 1, 0) }, uLook2: { value: new THREE.Vector4(1, 1, 0, 0) }, uLook3: { value: new THREE.Vector4() }, uLook4: { value: new THREE.Vector4() }, uLook5: { value: new THREE.Vector4(0, 1, 0, 0) }, uLook6: { value: new THREE.Vector4() }, uBoreInk: { value: new THREE.Vector4() }, uBoreInk2: { value: new THREE.Vector4() }, uInkTint: v3([1, 1, 1]), uSkyTint: { value: new THREE.Vector4() }, uMoonCol: { value: new THREE.Vector4() },
+      uLook: { value: new THREE.Vector4(0, 1, 1, 0) }, uLook2: { value: new THREE.Vector4(1, 1, 0, 0) }, uLook3: { value: new THREE.Vector4() }, uLook4: { value: new THREE.Vector4() }, uLook5: { value: new THREE.Vector4(0, 1, 0, 0) }, uLook6: { value: new THREE.Vector4() }, uBoreInk: { value: new THREE.Vector4() }, uBoreInk2: { value: new THREE.Vector4() }, uInkTint: v3([1, 1, 1]), uSkyTint: { value: new THREE.Vector4() }, uMoonCol: { value: new THREE.Vector4() }, uLampMirror: { value: 1 },
     });
     // the paper is fixed to the sheet: realtime painting (cachePaper = true) renders it once per size / style
     this.paintMat.uniforms.uWaterRefl = { value: new THREE.Vector2(1, 0) };   // shot.waterRefl
@@ -2005,6 +2014,7 @@ export class InkPainter {
     U.uInkTint.value.set(...(shot.tint || [1, 1, 1]));
     U.uSkyTint.value.set(...(shot.skyTint || [0, 0, 0, 0]));
     U.uMoonCol.value.set(...(shot.moonCol || [0, 0, 0, 0]));
+    U.uLampMirror.value = shot.lampMirror ?? 1;
     U.uWaterRefl.value.set(...(shot.waterRefl || [1, 0]));
     U.uPaperTex.value = 0;
     if (this.cachePaper) {

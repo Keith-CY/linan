@@ -184,6 +184,9 @@ function inkFor(engine) {
       const bb = base.bands || [];
       out.bands = w < 0.5 ? bb.map((b) => [b[0], b[1], b[2] * (1 - 2 * w), b[3]]) : walk.bands.map((b) => [b[0], b[1], b[2] * (2 * w - 1), b[3]]);
       out.grazeFix = 0.3; out.grazeW = w;
+      // the lit openings' mirror images in the water: the look's own lanterns at its viewpoint, the photograph's
+      // glints away from it (src/ink/painter.js uLampMirror: a lit window's mirror image is a square block)
+      out.lampMirror = (base.lampMirror ?? 1) * (1 - w);
       out.focus = (base.focus || []).map(([x, y, z, r, lo]) => [x, y, z, r, lerp(lo ?? 0.25, this.floor, w)]);
       if (w > 0.999) out.patch = null;
       return out;
