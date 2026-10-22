@@ -15,21 +15,24 @@ import * as THREE from 'three';
 import { makeFeilai } from '../karst/feilai.js';
 import { meshRegion } from '../karst/build.js';
 import { toGeometry } from '../sculpt/mesher.js';
-import { loadOrBuild } from '../core/cache.js';
+import { loadOrBuild, lazyBake } from '../core/cache.js';
 import { karstMaterial, setKarstSeason } from '../karst/material.js';
 
 export const KARST_VERSION = 'v4';   // v4: the 布袋 seated cross-legged (ink08); v3: the bigger 布袋 and its niche, vertical jointing
 const q = (detail) => (detail >= 1 ? 'hi' : 'lo');
 export const feilaiName = (region, detail) => `karst-feilai-${region}-${q(detail)}-${KARST_VERSION}`;
 
-/** the cliff geometries (baked when available) → { F, origin, parts: [{ name, geo }] } */
-export async function feilaiGeometries(detail = 1, F = makeFeilai()) {
+/** the cliff geometries (baked when available) → { F, origin, parts: [{ name, geo, lazy }] }; lazy: placeholders
+ *  filled when their bake is loaded (src/core/cache.js lazyBake; the explorable world, src/explore/lazy.js) */
+export async function feilaiGeometries(detail = 1, F = makeFeilai(), lazy = false) {
   const regions = F.regions(detail);
   const origin = F.budai.origin.map((v) => Math.round(v));
   const parts = [];
   for (const R of regions) {
-    const geo = await loadOrBuild(feilaiName(R.name, detail), () => toGeometry(meshRegion(F.sdf, regions, R.name, { origin, carved: F.carved })));
-    parts.push({ name: R.name, geo });
+    const build = () => toGeometry(meshRegion(F.sdf, regions, R.name, { origin, carved: F.carved }));
+    const name = feilaiName(R.name, detail);
+    if (lazy) { const r = await lazyBake(name, build); parts.push({ name: R.name, geo: r.geo, lazy: r.lazy }); }
+    else parts.push({ name: R.name, geo: await loadOrBuild(name, build) });
   }
   return { F, origin, parts, regions };
 }
@@ -42,7 +45,11 @@ function feilaiMaterial() {
 export async function build(engine) {
   const t0 = performance.now();
   const detail = engine.quality.detail ?? 1;
-  const { F, origin, parts } = await feilaiGeometries(detail);
+  // the explorable world loads the baked cliff when the walker comes near (src/explore/lazy.js; ?lazyBakes=0: at load)
+  const lazy = engine.explore && engine.params?.get?.('lazyBakes') !== '0';
+  const liveSet = engine.explore && detail > 0.5 && engine.params?.get?.('karstLive') !== 'full';
+  const { F, origin, parts } = await feilaiGeometries(detail, undefined, lazy);
+  const lazyList = (engine.registry.lazyBakes ||= []);
   const mat = feilaiMaterial();
   const group = new THREE.Group();
   group.name = 'karst:feilai';
@@ -55,13 +62,14 @@ export async function build(engine) {
     m.position.set(...origin);
     if (p.name.startsWith('far')) m.userData.castShadow = false;   // the outer cliff casts nothing into the shot-8 view worth 4 cascades
     group.add(m);
-    tris += p.geo.index.count / 3;
+    tris += p.geo.index ? p.geo.index.count / 3 : 0;
+    if (p.lazy) lazyList.push({ lazy: p.lazy, mesh: m, level: liveSet ? 'still' : 'live' });
   }
   engine.add(group, { castShadow: true, receiveShadow: true });
   // the explorable world walks with the cliff at half detail (a quarter of the triangles); the still view
   // (src/explore/still.js) shows the stills' full-detail cliff
-  if (engine.explore && detail > 0.5 && engine.params?.get?.('karstLive') !== 'full') {
-    const L = await feilaiGeometries(0.5);
+  if (liveSet) {
+    const L = await feilaiGeometries(0.5, F, lazy);
     const live = new THREE.Group(); live.name = 'karst:feilai:live';
     for (const p of L.parts) {
       const m = new THREE.Mesh(p.geo, mat);
@@ -69,6 +77,7 @@ export async function build(engine) {
       m.position.set(...L.origin);
       if (p.name.startsWith('far')) m.userData.castShadow = false;
       live.add(m);
+      if (p.lazy) lazyList.push({ lazy: p.lazy, mesh: m, level: 'live' });
     }
     engine.add(live, { castShadow: true, receiveShadow: true });
     group.visible = false;

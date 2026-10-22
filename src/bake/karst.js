@@ -27,6 +27,12 @@ export async function runPool(jobs, workerUrl, threads) {
   return out;
 }
 
+/** the names of the current karst bakes (every region at both qualities) */
+export function bakeNames() {
+  const F = makeFeilai();
+  return [1, 0.5].flatMap((detail) => F.regions(detail).map((R) => feilaiName(R.name, detail)));
+}
+
 export async function bake() {
   const env = process.env;
   const details = (env.KARST_DETAIL || '1,0.5').split(',').map(Number);

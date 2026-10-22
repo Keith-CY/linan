@@ -9,6 +9,11 @@ import { outcropName, taihuName } from '../modules/rocks.js';
 import { toGeometry } from '../sculpt/mesher.js';
 import { runPool } from './karst.js';
 
+/** the names of the current rock bakes (every outcrop and 太湖石 at both qualities) */
+export function bakeNames() {
+  return [1, 0.5].flatMap((detail) => [...outcropSites().map((S) => outcropName(S.name, detail)), ...TAIHU.map((T) => taihuName(T.seed, detail))]);
+}
+
 export async function bake() {
   const env = process.env;
   const details = (env.ROCKS_DETAIL || '1,0.5').split(',').map(Number);

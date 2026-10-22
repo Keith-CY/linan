@@ -62,11 +62,14 @@ export class StillView {
       ? [shot, ...extraCamsOf(shot.id), ...(R.terrainCams || [])]
       : [{ pos: cam.position.toArray(), target: cam.position.clone().addScaledVector(d, 100).toArray(), fov: cam.fov }];
     const stream = R.terrain?.stream;
+    // the baked rocks and cliff this view (and its shadows) reach, at the stills' detail (src/explore/lazy.js)
+    const bakes = R.lazy?.forStill(cam);
     if (stream) {
       const leaves = planLeaves(cams, TERRAIN);
       const ok = await stream.showSet(leaves, TERRAIN.N);
       if (!ok || token !== this.token) return false;
     }
+    if (bakes) { await bakes; if (token !== this.token) return false; }
     if (token !== this.token) return false;
     // a viewpoint: the stills' water depth first (src/explore/watermap.js, computed once after the load)
     if (shot && R.stillWater) { await R.stillWater; if (token !== this.token) return false; }

@@ -6,10 +6,17 @@ import { meshLeaf } from '../terrain/mesh.js';
 import { coverCandidates } from './cover.js';
 import { farmPlan, farmCovers } from './farm.js';
 import { weld } from '../core/weld.js';
+import { readBake } from '../core/bakeread.js';
 
 self.onmessage = async (ev) => {
   const { id, op } = ev.data;
   try {
+    if (op === 'bake') {
+      // a compact bake (src/core/bakefmt.js): fetched, un-gzipped and decoded here
+      const r = await readBake(ev.data.url);
+      self.postMessage({ id, ...r }, [r.position.buffer, ...(r.normal ? [r.normal.buffer] : []), ...r.extra.map((x) => x.array.buffer), r.index.buffer]);
+      return;
+    }
     if (op === 'leaf') {
       const { x0, z0, size, N } = ev.data;
       const m = meshLeaf({ x0, z0, size }, N);

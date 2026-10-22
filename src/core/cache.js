@@ -10,9 +10,67 @@
 //
 // Bump the name/version string whenever the generator changes, otherwise a stale bake is used.
 // If the file is missing, loadOrBuild just builds at runtime (slower, still correct).
+//
+// Two formats: generated/<name>.bin (float positions and normals, as built: what the offline stills read) and the
+// compact generated/<name>.geo (src/core/bakefmt.js: quantised and gzipped, ~1/4.5 of the size: what the explorable
+// page downloads), listed in generated/manifest.json (tools/bake.mjs writes all three). The explorable world asks for
+// the compact one first (useCompactBakes()) and may load it lazily (lazyBake: a placeholder with the bake's bounds
+// now, the geometry when load() is called; src/explore/lazy.js decides when).
 import * as THREE from 'three';
 
 const isNode = typeof window === 'undefined';
+const GEN = isNode ? null : new URL('../../generated/', import.meta.url);
+let compactFirst = false;
+let manifestP = null;
+
+/** the explorable world: compact bakes first */
+export function useCompactBakes(on = true) { compactFirst = on; }
+
+/** generated/manifest.json (null when there is none) */
+export function bakeManifest() {
+  if (isNode) return Promise.resolve(null);
+  return (manifestP ||= fetch(new URL('manifest.json', GEN)).then((r) => (r.ok ? r.json() : null)).catch(() => null));
+}
+
+/** a compact bake decoded in the height workers into geo (a new geometry when none is given), or null */
+async function loadCompact(name, geo = null) {
+  const M = await bakeManifest();
+  const e = M?.bakes?.[name];
+  if (!e) return null;
+  const { getHeightPool } = await import('../explore/heightpool.js');
+  const r = await getHeightPool().bake(new URL(e.file, GEN).href);
+  const g = geo || new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(r.position, 3));
+  if (r.normal) g.setAttribute('normal', new THREE.BufferAttribute(r.normal, 3));
+  for (const x of r.extra) g.setAttribute(x.name, new THREE.BufferAttribute(x.array, x.itemSize, x.normalized));
+  g.setIndex(new THREE.BufferAttribute(r.index, 1));
+  g.setDrawRange(0, Infinity);
+  g.computeBoundingBox(); g.computeBoundingSphere();
+  return g;
+}
+
+/**
+ * explore: the bake as a placeholder now (no vertices; its bounds from the manifest, so culling and the shadow range
+ * work) and { load() } that fills that same geometry in (once); without a compact bake, the geometry itself
+ * (loadOrBuild) and lazy null.
+ */
+export async function lazyBake(name, build) {
+  const M = await bakeManifest();
+  const e = M?.bakes?.[name];
+  if (!e) return { geo: await loadOrBuild(name, build), lazy: null };
+  const geo = new THREE.BufferGeometry();
+  geo.name = name;
+  const b = e.box;
+  geo.boundingBox = new THREE.Box3(new THREE.Vector3(b[0], b[1], b[2]), new THREE.Vector3(b[3], b[4], b[5]));
+  geo.boundingSphere = geo.boundingBox.getBoundingSphere(new THREE.Sphere());
+  let p = null;
+  const lazy = {
+    name, geo, bytes: e.bytes, ready: false, onReady: null,
+    load: () => (p ||= loadCompact(name, geo).then(() => { lazy.ready = true; lazy.onReady?.(geo); return geo; })),
+  };
+  geo.userData.lazy = lazy;
+  return { geo, lazy };
+}
 
 export function serializeGeometry(geo) {
   const attrs = Object.entries(geo.attributes);
@@ -62,10 +120,12 @@ export const bakeRegistry = new Map();
 
 export async function loadOrBuild(name, build) {
   if (isNode) { const g = await build(); bakeRegistry.set(name, g); return g; }
+  if (compactFirst) { const g = await loadCompact(name); if (g) return g; }
   try {
-    const res = await fetch(`/generated/${name}.bin`);
+    const res = await fetch(new URL(`${name}.bin`, GEN));
     if (res.ok) return deserializeGeometry(await res.arrayBuffer());
   } catch { /* fall through */ }
+  if (!compactFirst) { const g = await loadCompact(name).catch(() => null); if (g) return g; }
   console.log(`[cache] ${name} not baked, building at runtime`);
   return build();
 }

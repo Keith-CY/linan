@@ -23,7 +23,7 @@ import { makeOutcrop } from '../karst/outcrop.js';
 import { outcropSites, TAIHU } from '../karst/sites.js';
 import { meshRegion } from '../karst/build.js';
 import { meshSDF, bakeRock, toGeometry } from '../sculpt/mesher.js';
-import { loadOrBuild } from '../core/cache.js';
+import { loadOrBuild, lazyBake } from '../core/cache.js';
 
 export const ROCKS_VERSION = 'v1';
 const q = (detail) => (detail >= 1 ? 'hi' : 'lo');
@@ -224,16 +224,26 @@ export async function build(engine) {
   // (src/explore/still.js) puts the stills' own back: { mesh, live, still } geometry pairs
   const lite = engine.explore && detail > 0.5 && engine.params?.get?.('rocksLive') !== 'full';
   const swaps = [];
+  // the explorable world loads the baked outcrops and 太湖石 as the walker comes near (src/explore/lazy.js; ?lazyBakes=0
+  // at load): placeholders with the bakes' bounds until then
+  const lazyOn = engine.explore && engine.params?.get?.('lazyBakes') !== '0';
+  const lazyList = (engine.registry.lazyBakes ||= []);
+  const get = async (name, build, mesh, level) => {
+    if (!lazyOn) return loadOrBuild(name, build);
+    const r = await lazyBake(name, build);
+    if (r.lazy) lazyList.push({ lazy: r.lazy, mesh, level });
+    return r.geo;
+  };
   // SDF outcrops (baked)
   let tris = 0;
   for (const S of outcropSites()) {
-    const geo = await loadOrBuild(outcropName(S.name, detail), () => toGeometry(buildOutcropMesh(S.name, detail)));
-    const m = new THREE.Mesh(geo, outMat[S.material]);
+    const m = new THREE.Mesh(undefined, outMat[S.material]);
+    const geo = (m.geometry = await get(outcropName(S.name, detail), () => toGeometry(buildOutcropMesh(S.name, detail)), m, lite ? 'still' : 'live'));
     m.position.set(...geo.userData.origin ?? makeOutcrop(S.spec).origin);
     m.name = 'rocks:outcrop-' + S.name;
-    if (lite) swaps.push({ mesh: m, still: geo, live: await loadOrBuild(outcropName(S.name, 0.5), () => toGeometry(buildOutcropMesh(S.name, 0.5))) });
+    if (lite) swaps.push({ mesh: m, still: geo, live: await get(outcropName(S.name, 0.5), () => toGeometry(buildOutcropMesh(S.name, 0.5)), m, 'live') });
     group.add(m);
-    tris += geo.index.count / 3;
+    tris += geo.index ? geo.index.count / 3 : 0;
   }
   // instances grouped by (site, kind, variant): each InstancedMesh has a local bounding sphere, so a shot only draws
   // (and shadows) the sites in its view
@@ -264,14 +274,14 @@ export async function build(engine) {
   }
   // 太湖石 (meshed SDF, baked)
   for (const T of TAIHU) {
-    const geo = await loadOrBuild(taihuName(T.seed, detail), () => toGeometry(buildTaihuMesh(T.seed, T.h, detail)));
-    const m = new THREE.Mesh(geo, taihuM);
+    const m = new THREE.Mesh(undefined, taihuM);
+    const geo = (m.geometry = await get(taihuName(T.seed, detail), () => toGeometry(buildTaihuMesh(T.seed, T.h, detail)), m, lite ? 'still' : 'live'));
     m.position.set(T.at[0], heightAt(T.at[0], T.at[1]) - 0.05, T.at[1]);
     m.rotation.y = L.headingToRotY(T.facing);
     m.name = 'rocks:taihu-' + T.seed;
-    if (lite) swaps.push({ mesh: m, still: geo, live: await loadOrBuild(taihuName(T.seed, 0.5), () => toGeometry(buildTaihuMesh(T.seed, T.h, 0.5))) });
+    if (lite) swaps.push({ mesh: m, still: geo, live: await get(taihuName(T.seed, 0.5), () => toGeometry(buildTaihuMesh(T.seed, T.h, 0.5)), m, 'live') });
     group.add(m);
-    tris += geo.index.count / 3;
+    tris += geo.index ? geo.index.count / 3 : 0;
     engine.footprints?.addCircle(T.at[0], T.at[1], T.h * 0.4, 'taihu');
   }
   engine.add(group, { castShadow: true, receiveShadow: true });

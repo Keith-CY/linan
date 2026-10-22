@@ -1,5 +1,5 @@
 // Minimal static file server (no caching) used by the render harness and for interactive viewing.
-// Usage: node tools/serve.mjs [port]   → http://localhost:8080/?shot=3
+// Usage: node tools/serve.mjs [port] [folder]   → http://localhost:8080/?shot=3 (folder: dist/ from tools/build-site.mjs)
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,6 +18,7 @@ const MIME = {
   '.bin': 'application/octet-stream',
   '.wasm': 'application/wasm',
   '.glsl': 'text/plain',
+  '.geo': 'application/octet-stream',
   '.css': 'text/css',
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
@@ -53,5 +54,6 @@ export function startServer(port = 0, root = ROOT) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.argv[2] || 8080);
-  startServer(port).then(({ port }) => console.log(`Serving ${ROOT} at http://localhost:${port}/`));
+  const root = process.argv[3] ? path.resolve(process.argv[3]) : ROOT;
+  startServer(port, root).then(({ port }) => console.log(`Serving ${root} at http://localhost:${port}/`));
 }

@@ -24,12 +24,15 @@ import { Walker } from './walker.js';
 import { ExploreUI, PLACES, TIMES, loadingProgress, hideLoading } from './ui.js';
 import { StillView } from './still.js';
 import { LIVE, liveState, applyLive, adapt, installPresent } from './tier.js';
+import { useCompactBakes } from '../core/cache.js';
 
 const P = new URLSearchParams(location.search);
 let S = null;           // explore state
 
 export function prepareExplore(engine) {
   engine.explore = true;
+  // the compact bakes (src/core/bakefmt.js), loaded as the walker comes near (src/explore/lazy.js)
+  useCompactBakes(true);
   const at = Number(P.get('at')) || 2;
   S = { engine, place: at, look: Number(P.get('time')) || at, frame: 0 };
   engine.onProgress = (f, name) => loadingProgress(0.04 + f * 0.9, name);
@@ -260,6 +263,12 @@ export async function startExplore(engine, { buildMs }) {
     const up = C.uploadNow(engine, roots, vegGeos);
     console.log(`[explore] ${n} static geometries uploaded (${up}) and their CPU copies dropped in ${Math.round(performance.now() - t0)} ms`);
   }
+  // the baked rocks and cliff near the start now, the rest as the walker comes near (src/explore/lazy.js)
+  {
+    const { LazyBakes } = await import('./lazy.js');
+    S.lazy = engine.registry.lazy = new LazyBakes(engine);
+    await S.lazy.atStart(engine.camera.position);
+  }
   // the countryside (src/explore/fields.js): hamlets' pieces at once, the fields when the workers have planned them
   // (low priority, a few seconds into the walk); ?farm=0 leaves it out
   if (P.get('farm') !== '0') {
@@ -349,6 +358,8 @@ export async function startExplore(engine, { buildMs }) {
       if ((reg && reg !== S.region) || (S.lastApply && S.lastApply.distanceTo(p) > 1500)) setLook(S.look);
       lap('look', t);
     }
+    // the lazily loaded bakes: the next one in the background; a filled one is drawn
+    if (S.lazy) { S.lazy.tick(p); if (S.lazy.changed) { S.lazy.changed = false; S.dirty = Math.max(S.dirty, 1); } }
     // the countryside's near tea rows, one tile a frame (src/explore/fields.js), not while a still view is up
     if (ST.phase === 'idle' && S.country?.step()) S.dirty = Math.max(S.dirty, 1);
     if (!moved && S.dirty <= 0) {
