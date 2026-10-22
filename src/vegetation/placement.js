@@ -78,6 +78,8 @@ export const SHOT_HEROES = {
 
 const KIND_OF = { willow: 'willow', peach: 'peach', pine: 'pine', camphor: 'camphor', maple: 'maple', ginkgo: 'ginkgo', broad: 'broad', osmanthus: 'broad', tea: 'broad', bamboo: 'broad' };
 
+const occKey = (i, j) => (i + 32768) * 65536 + (j + 32768);
+
 class Placer {
   constructor(engine, sys, lib) {
     this.engine = engine; this.sys = sys; this.lib = lib;
@@ -86,16 +88,18 @@ class Placer {
     this.occ = new Map(); // 3 m grid: trunk occupancy (no two trunks within ~2.5 m)
     this.terraces = (L.TERRACES || []).map((t) => ({ ...t, a: ((t.rot || 0) * Math.PI) / 180 }));
   }
-  _key(x, z) { return `${Math.floor(x / 3)},${Math.floor(z / 3)}`; }
+  // the 3 m cell (i, j) as one number (cells within ±32768 of the origin: ±98 km); each cell holds x, z, r triples
+  _key(x, z) { return occKey(Math.floor(x / 3), Math.floor(z / 3)); }
   taken(x, z, r = 2.5) {
-    const n = Math.ceil(r / 3);
+    const n = Math.ceil(r / 3), ci = Math.floor(x / 3), cj = Math.floor(z / 3);
     for (let i = -n; i <= n; i++) for (let j = -n; j <= n; j++) {
-      const v = this.occ.get(`${Math.floor(x / 3) + i},${Math.floor(z / 3) + j}`);
-      if (v && v.some((p) => Math.hypot(p[0] - x, p[1] - z) < Math.max(r, p[2]))) return true;
+      const v = this.occ.get(occKey(ci + i, cj + j));
+      if (!v) continue;
+      for (let k = 0; k < v.length; k += 3) if (Math.hypot(v[k] - x, v[k + 1] - z) < Math.max(r, v[k + 2])) return true;
     }
     return false;
   }
-  claim(x, z, r) { const k = this._key(x, z); if (!this.occ.has(k)) this.occ.set(k, []); this.occ.get(k).push([x, z, r]); }
+  claim(x, z, r) { const k = this._key(x, z); let a = this.occ.get(k); if (!a) this.occ.set(k, (a = [])); a.push(x, z, r); }
   onTerrace(x, z, m = 4) {
     for (const t of this.terraces) {
       const dx = x - t.center[0], dz = z - t.center[1];
@@ -483,65 +487,98 @@ class Placer {
   }
 
   // ---------------------------------------------------------------- hill-forest cover in every shot's view cone
-  cover() {
-    const bands = [[0, 450, 7.5], [450, 1300, 10.5], [1300, 3600, 14]];
+  /** pre: the candidates (coverPlan) and their ground (coverGround) computed ahead (the explorable world asks the
+   *  height workers for the ground while the buildings build: src/modules/vegetation.js prefetch) */
+  cover(pre = null) {
     const cb = L.CITY.bounds;
-    const done = new Set();
-    const qd = this.q.density ?? 1;
-    for (const S of planCams()) {
-      const dx = S.target[0] - S.pos[0], dz = S.target[2] - S.pos[2], l = Math.hypot(dx, dz);
-      const fx = dx / l, fz = dz / l;
-      const aspect = 1664 / 928;
-      const tanV = Math.tan(((S.fov || 40) * Math.PI) / 360), tanH = tanV * aspect;
-      const half = Math.atan(tanH) + 0.15;
-      for (const [bi, [r0, r1, cell]] of bands.entries()) {
-        const i0 = Math.floor((S.pos[0] - r1) / cell), i1 = Math.ceil((S.pos[0] + r1) / cell);
-        const j0 = Math.floor((S.pos[2] - r1) / cell), j1 = Math.ceil((S.pos[2] + r1) / cell);
-        for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
-          const key = bi * 1e8 + i * 1e4 + j;
-          if (done.has(key)) continue;
-          const x = (i + 0.15 + 0.7 * hash01(i, j, bi, 1)) * cell, z = (j + 0.15 + 0.7 * hash01(i, j, bi, 2)) * cell;
-          const vx = x - S.pos[0], vz = z - S.pos[2], d = Math.hypot(vx, vz);
-          if (d < r0 || d > r1 || d < 25) continue;
-          const cosA = (vx * fx + vz * fz) / d;
-          if (cosA < Math.cos(half) && d > 40) continue;
-          done.add(key);
-          // thinning toward the far edge of the last band (the terrain canopy shader takes over)
-          let keep = bi === 2 ? 0.9 * (1 - ((d - r0) / (r1 - r0)) ** 2 * 0.6) : 0.88;
-          keep *= qd ** 0.35;
-          if (hash01(i, j, bi, 3) > keep) continue;
-          const y = heightAt(x, z);
-          if (y < 2.0) continue;
-          if (x > cb[0] && x < cb[2] && z > cb[1] && z < cb[3] && y < L.CITY.ground + 9) continue; // the city (city() handles it); its hills (吴山) keep their wood
-          if (lakeSDF(x, z) < 8) continue;
-          const sl = slopeAt(x, z, 3);
-          // the steep wooded hill behind 灵隐 (ref08) keeps its trees
-          if (sl > (Math.hypot(x + 3700, z - 345) < 260 ? 1.1 : 0.6)) continue;
-          // only on wooded ground: hills, or the plain away from the shores and fields
-          const hillish = y > 9 || sl > 0.06;
-          if (!hillish && hash01(i, j, bi, 4) > 0.25) continue;
-          const h = hash01(i, j, bi, 5);
-          let kind;
-          if (y > 70 || sl > 0.3) kind = h < 0.55 ? 'pineM' : h < 0.75 ? 'pineH' : 'camphor';
-          else if (y > 30) kind = h < 0.25 ? 'pineM' : h < 0.6 ? 'camphor' : 'broad';
-          else kind = h < 0.12 ? 'pineM' : h < 0.55 ? 'camphor' : 'broad';
-          // inside (or near) a PLANTS tree zone the cover takes the zone's species (e.g. the 宝石山 pines of shot 1)
-          const zs = this.zoneSpecies(x, z);
-          if (zs) kind = zs === 'pine' ? (h < 0.7 ? 'pineM' : 'pineH') : (KIND_OF[zs] || kind);
-          // 灵隐 valley: maples and ginkgo among the broadleaf (autumn colour, ref08)
-          if (L.LINGYIN && Math.hypot(x - L.LINGYIN.temple[0], z - L.LINGYIN.temple[1]) < 500) {
-            const m = hash01(i, j, bi, 6);
-            if (m < 0.18) kind = 'maple'; else if (m < 0.3) kind = 'ginkgo';
-          }
-          const sc = (0.85 + 0.45 * hash01(i, j, bi, 7)) * (bi === 2 ? 1.2 : bi === 1 ? 1.08 : 1);
-          if (!this.put(kind, x, z, hash01(i, j, bi, 8), { scale: sc, r: cell * 0.3 }) && d < 200 && this.lib.shrub?.length) {
-            const lim = this.viewLimit(x, z, y, 1);
-            if (lim > 1.1 && lim < 8) this.put('shrub', x, z, hash01(i, j, bi, 9), { scale: Math.min(1.6, lim / 1.4) * (0.75 + 0.25 * hash01(i, j, bi, 10)), r: 1.2 });
-          }
-        }
+    const C = pre?.plan || coverPlan(this.q.density ?? 1);
+    const G = pre?.ground || coverGround(C.x, C.z);
+    for (let k = 0; k < C.n; k++) {
+      const x = C.x[k], z = C.z[k], d = C.d[k], i = C.i[k], j = C.j[k], bi = C.bi[k], cell = BANDS[bi][2];
+      const y = G.y[k];
+      if (y < 2.0) continue;
+      if (x > cb[0] && x < cb[2] && z > cb[1] && z < cb[3] && y < L.CITY.ground + 9) continue; // the city (city() handles it); its hills (吴山) keep their wood
+      if (G.lake[k] < 8) continue;
+      const sl = G.slope[k];
+      // the steep wooded hill behind 灵隐 (ref08) keeps its trees
+      if (sl > (Math.hypot(x + 3700, z - 345) < 260 ? 1.1 : 0.6)) continue;
+      // only on wooded ground: hills, or the plain away from the shores and fields
+      const hillish = y > 9 || sl > 0.06;
+      if (!hillish && hash01(i, j, bi, 4) > 0.25) continue;
+      const h = hash01(i, j, bi, 5);
+      let kind;
+      if (y > 70 || sl > 0.3) kind = h < 0.55 ? 'pineM' : h < 0.75 ? 'pineH' : 'camphor';
+      else if (y > 30) kind = h < 0.25 ? 'pineM' : h < 0.6 ? 'camphor' : 'broad';
+      else kind = h < 0.12 ? 'pineM' : h < 0.55 ? 'camphor' : 'broad';
+      // inside (or near) a PLANTS tree zone the cover takes the zone's species (e.g. the 宝石山 pines of shot 1)
+      const zs = this.zoneSpecies(x, z);
+      if (zs) kind = zs === 'pine' ? (h < 0.7 ? 'pineM' : 'pineH') : (KIND_OF[zs] || kind);
+      // 灵隐 valley: maples and ginkgo among the broadleaf (autumn colour, ref08)
+      if (L.LINGYIN && Math.hypot(x - L.LINGYIN.temple[0], z - L.LINGYIN.temple[1]) < 500) {
+        const m = hash01(i, j, bi, 6);
+        if (m < 0.18) kind = 'maple'; else if (m < 0.3) kind = 'ginkgo';
+      }
+      const sc = (0.85 + 0.45 * hash01(i, j, bi, 7)) * (bi === 2 ? 1.2 : bi === 1 ? 1.08 : 1);
+      if (!this.put(kind, x, z, hash01(i, j, bi, 8), { scale: sc, r: cell * 0.3 }) && d < 200 && this.lib.shrub?.length) {
+        const lim = this.viewLimit(x, z, y, 1);
+        if (lim > 1.1 && lim < 8) this.put('shrub', x, z, hash01(i, j, bi, 9), { scale: Math.min(1.6, lim / 1.4) * (0.75 + 0.25 * hash01(i, j, bi, 10)), r: 1.2 });
       }
     }
   }
+}
+
+// the cover's distance bands round each camera: [from, to, cell] m
+const BANDS = [[0, 450, 7.5], [450, 1300, 10.5], [1300, 3600, 14]];
+
+/**
+ * the hill-forest cover's candidates, in the order the placement visits them (every plan camera's view cone, three
+ * bands, each grid cell once), with the tests that need no ground applied: { n, x, z, d, i, j, bi } (typed arrays;
+ * d = the distance from the camera that claimed the cell)
+ */
+export function coverPlan(qd = 1) {
+  const done = new Set();
+  let n = 0, cap = 1 << 16;
+  let x = new Float64Array(cap), z = new Float64Array(cap), d = new Float64Array(cap), I = new Int32Array(cap), J = new Int32Array(cap), B = new Int32Array(cap);
+  const grow = () => {
+    cap *= 2;
+    const g = (a, C) => { const b = new C(cap); b.set(a); return b; };
+    x = g(x, Float64Array); z = g(z, Float64Array); d = g(d, Float64Array); I = g(I, Int32Array); J = g(J, Int32Array); B = g(B, Int32Array);
+  };
+  for (const S of planCams()) {
+    const dx = S.target[0] - S.pos[0], dz = S.target[2] - S.pos[2], l = Math.hypot(dx, dz);
+    const fx = dx / l, fz = dz / l;
+    const aspect = 1664 / 928;
+    const tanV = Math.tan(((S.fov || 40) * Math.PI) / 360), tanH = tanV * aspect;
+    const half = Math.atan(tanH) + 0.15;
+    for (const [bi, [r0, r1, cell]] of BANDS.entries()) {
+      const i0 = Math.floor((S.pos[0] - r1) / cell), i1 = Math.ceil((S.pos[0] + r1) / cell);
+      const j0 = Math.floor((S.pos[2] - r1) / cell), j1 = Math.ceil((S.pos[2] + r1) / cell);
+      for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+        const key = bi * 1e8 + i * 1e4 + j;
+        if (done.has(key)) continue;
+        const cx = (i + 0.15 + 0.7 * hash01(i, j, bi, 1)) * cell, cz = (j + 0.15 + 0.7 * hash01(i, j, bi, 2)) * cell;
+        const vx = cx - S.pos[0], vz = cz - S.pos[2], dd = Math.hypot(vx, vz);
+        if (dd < r0 || dd > r1 || dd < 25) continue;
+        const cosA = (vx * fx + vz * fz) / dd;
+        if (cosA < Math.cos(half) && dd > 40) continue;
+        done.add(key);
+        // thinning toward the far edge of the last band (the terrain canopy shader takes over)
+        let keep = bi === 2 ? 0.9 * (1 - ((dd - r0) / (r1 - r0)) ** 2 * 0.6) : 0.88;
+        keep *= qd ** 0.35;
+        if (hash01(i, j, bi, 3) > keep) continue;
+        if (n === cap) grow();
+        x[n] = cx; z[n] = cz; d[n] = dd; I[n] = i; J[n] = j; B[n] = bi; n++;
+      }
+    }
+  }
+  return { n, x: x.subarray(0, n), z: z.subarray(0, n), d: d.subarray(0, n), i: I.subarray(0, n), j: J.subarray(0, n), bi: B.subarray(0, n) };
+}
+
+/** the ground at the cover's candidates: { y, lake, slope } (Float64Array each; pure: the height workers can do it) */
+export function coverGround(x, z) {
+  const n = x.length, y = new Float64Array(n), lake = new Float64Array(n), slope = new Float64Array(n);
+  for (let k = 0; k < n; k++) { y[k] = heightAt(x[k], z[k]); lake[k] = lakeSDF(x[k], z[k]); slope[k] = slopeAt(x[k], z[k], 3); }
+  return { y, lake, slope };
 }
 
 function distSeg(x, z, a, b) {
@@ -550,7 +587,7 @@ function distSeg(x, z, a, b) {
   return Math.hypot(x - a[0] - ex * t, z - a[1] - ez * t);
 }
 
-export async function placeWorld(engine, sys, lib) {
+export async function placeWorld(engine, sys, lib, { coverPre = null } = {}) {
   const t0 = performance.now();
   const P = new Placer(engine, sys, lib);
   const timing = {};
@@ -561,7 +598,8 @@ export async function placeWorld(engine, sys, lib) {
   step('islands', () => P.islands());
   step('shores', () => P.shores());
   step('city', () => P.city());
-  step('cover', () => P.cover());
+  const pre = coverPre ? await coverPre : null;
+  step('cover', () => P.cover(pre));
   console.log(`[vegetation] placement ${Math.round(performance.now() - t0)} ms ${JSON.stringify(timing)}`);
   return { counts: P.counts, placer: P };
 }

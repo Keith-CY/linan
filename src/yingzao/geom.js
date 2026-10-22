@@ -51,7 +51,8 @@ export class MeshBuilder {
     if (o) { this.pos.set(o.pos.subarray(0, this.n * 3)); this.nor.set(o.nor.subarray(0, this.n * 3)); this.paint.set(o.paint.subarray(0, this.n * 4)); this.uv.set(o.uv.subarray(0, this.n * 2)); this.ao.set(o.ao.subarray(0, this.n * 2)); }
     this.cap = cap;
   }
-  reserve(k) { if (this.n + k > this.cap) this._alloc(Math.max(this.cap * 2, this.n + k, 768)); }
+  // (growing 4× while small: most of the copying went into the doublings of the big family builders)
+  reserve(k) { if (this.n + k > this.cap) this._alloc(Math.max(this.cap * (this.cap < 1 << 20 ? 4 : 2), this.n + k, 768)); }
   get count() { return this.n; }
 
   /** one vertex */

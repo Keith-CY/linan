@@ -1,7 +1,7 @@
 // Worker for the explorable world (src/explore/heightpool.js): terrain patches and height grids from the analytic
 // heightfield, off the main thread; also the vertex welding of built meshes (src/core/weld.js).
 // Pure: no three.js, so no import map is needed.
-import { heightAt } from '../world/heightfield.js';
+import { heightAt, lakeSDF, slopeAt } from '../world/heightfield.js';
 import { meshLeaf } from '../terrain/mesh.js';
 import { coverCandidates } from './cover.js';
 import { farmPlan, farmCovers } from './farm.js';
@@ -38,6 +38,11 @@ self.onmessage = async (ev) => {
     } else if (op === 'farmCovers') {
       const out = farmCovers(ev.data);
       self.postMessage({ id, data: out }, [out.buffer]);
+    } else if (op === 'ground') {
+      // the vegetation cover's candidates (src/vegetation/placement.js coverGround): height, lake distance, slope
+      const { x, z } = ev.data, n = x.length, y = new Float64Array(n), lake = new Float64Array(n), slope = new Float64Array(n);
+      for (let k = 0; k < n; k++) { y[k] = heightAt(x[k], z[k]); lake[k] = lakeSDF(x[k], z[k]); slope[k] = slopeAt(x[k], z[k], 3); }
+      self.postMessage({ id, y, lake, slope }, [y.buffer, lake.buffer, slope.buffer]);
     } else if (op === 'weld') {
       const { n, arrays, sizes } = ev.data;
       const r = weld(n, arrays.map((a, i) => [a, sizes[i]]));

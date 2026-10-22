@@ -63,20 +63,27 @@ export const WATER_SHOTS = {
 const WAKE = { huafang: { beam: 3.6, speed: 0, rings: 0.25 }, skiff: { beam: 1.3, speed: 0.9, rings: 0.4 }, wupeng: { beam: 1.8, speed: 0, rings: 0.3 },
   cargo: { beam: 3.0, speed: 0, rings: 0.25 }, junk: { beam: 5.0, speed: 0, rings: 0.2 } };
 
+/** the explorable world's height maps (src/world/index.js asks for them early: the height workers fill them while
+ *  the buildings build) → [[bounds, res, Promise<grid>], …] */
+const MAPS = (engine) => { const res = engine.quality.detail >= 1 ? 2048 : 1536; return [[NEAR_BOUNDS, res], [REGION_BOUNDS.city, res], [REGION_BOUNDS.river, res], [FAR_BOUNDS, 1024]]; };
+export function prefetch(engine) {
+  if (!engine.explore || engine.registry.waterPrefetch) return;
+  engine.registry.waterPrefetch = import('../explore/heightpool.js').then(({ getHeightPool }) => MAPS(engine).map(([bounds, res]) => {
+    const [x0, z0, x1, z1] = bounds, aspect = (x1 - x0) / (z1 - z0);
+    const W = aspect >= 1 ? res : Math.round(res * aspect), H = aspect >= 1 ? Math.round(res / aspect) : res;
+    return getHeightPool().grid(bounds, W, H);
+  }));
+}
+
 export async function build(engine) {
   const t0 = performance.now();
   const q = engine.quality;
   const level = L.WATER_LEVEL;
   // the explorable world (engine.explore) streams its terrain, so nothing is meshed yet: analytic heights from workers
-  const cap = async (bounds, res) => {
-    if (!engine.explore) return captureHeightMap(engine, { bounds, res });
-    const [x0, z0, x1, z1] = bounds, aspect = (x1 - x0) / (z1 - z0);
-    const W = aspect >= 1 ? res : Math.round(res * aspect), H = aspect >= 1 ? Math.round(res / aspect) : res;
-    const { getHeightPool } = await import('../explore/heightpool.js');
-    return captureHeightMap(engine, { bounds, res, grid: await getHeightPool().grid(bounds, W, H) });
-  };
-  const res = q.detail >= 1 ? 2048 : 1536;
-  const [near, city, river, far] = await Promise.all([cap(NEAR_BOUNDS, res), cap(REGION_BOUNDS.city, res), cap(REGION_BOUNDS.river, res), cap(FAR_BOUNDS, 1024)]);
+  let grids = null;
+  if (engine.explore) { prefetch(engine); grids = await engine.registry.waterPrefetch; delete engine.registry.waterPrefetch; }
+  const [near, city, river, far] = await Promise.all(MAPS(engine).map(async ([bounds, res], i) =>
+    (grids ? captureHeightMap(engine, { bounds, res, grid: await grids[i] }) : captureHeightMap(engine, { bounds, res }))));
   const maps = { near, far };
   const regions = { lake: near, city, river };
   const ground = makeGround([near, city, river, far]);

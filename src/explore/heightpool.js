@@ -7,10 +7,11 @@
 //                                                               slabs at low priority (terrain patches go first)
 //   const c = await pool.farmCovers(plan, pts)                → Uint8Array: which of the points [x, z, …] stand on the fields
 //   const b = await pool.bake(url)                            → a compact bake fetched and decoded (src/core/bakeread.js)
+//   const g = await pool.ground(x, z)                        → { y, lake, slope } at the points (the vegetation cover)
 //   const w = await pool.weld(n, arrays, sizes)               → src/core/weld.js weld() of n vertices (the arrays are
 //                                                               transferred: detached here until the result comes back)
 // Falls back to the main thread when module workers are unavailable.
-import { heightAt } from '../world/heightfield.js';
+import { heightAt, lakeSDF, slopeAt } from '../world/heightfield.js';
 import { meshLeaf } from '../terrain/mesh.js';
 import { coverCandidates } from './cover.js';
 import { farmPlan, farmCovers } from './farm.js';
@@ -79,6 +80,11 @@ class HeightPool {
     if (msg.op === 'farm') return farmPlan(msg);
     if (msg.op === 'farmCovers') return { data: farmCovers(msg) };
     if (msg.op === 'weld') return weld(msg.n, msg.arrays.map((a, i) => [a, msg.sizes[i]]));
+    if (msg.op === 'ground') {
+      const { x, z } = msg, n = x.length, y = new Float64Array(n), lake = new Float64Array(n), slope = new Float64Array(n);
+      for (let k = 0; k < n; k++) { y[k] = heightAt(x[k], z[k]); lake[k] = lakeSDF(x[k], z[k]); slope[k] = slopeAt(x[k], z[k], 3); }
+      return { y, lake, slope };
+    }
     if (msg.op === 'bake') return readBake(msg.url);
     const { x0, z0, dx, dz, W, j0, j1 } = msg;
     const data = new Float32Array(W * (j1 - j0));
@@ -121,6 +127,18 @@ class HeightPool {
 
   /** a compact bake (src/core/bakefmt.js) fetched and decoded in a worker → { position, normal, extra, index } */
   bake(url) { return this._run({ op: 'bake', url }); }
+
+  /** height, lake distance and slope at the points (x[k], z[k]) (Float64Arrays), split over the workers */
+  async ground(x, z) {
+    const n = x.length, parts = Math.max(1, this.size * 2), step = Math.ceil(n / parts), jobs = [];
+    for (let a = 0; a < n; a += step) {
+      const xs = x.slice(a, Math.min(n, a + step)), zs = z.slice(a, Math.min(n, a + step));
+      jobs.push(this._run({ op: 'ground', x: xs, z: zs }, [xs.buffer, zs.buffer]).then((r) => [a, r]));
+    }
+    const out = { y: new Float64Array(n), lake: new Float64Array(n), slope: new Float64Array(n) };
+    for (const [a, r] of await Promise.all(jobs)) { out.y.set(r.y, a); out.lake.set(r.lake, a); out.slope.set(r.slope, a); }
+    return out;
+  }
 
   weld(n, arrays, sizes) {
     const own = arrays.map((a) => (a.byteOffset === 0 && a.byteLength === a.buffer.byteLength ? a : a.slice()));

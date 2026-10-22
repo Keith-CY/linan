@@ -29,6 +29,10 @@ export const MODULE_ORDER = [
   'mist',         // mist lying on the lake
 ];
 
+// the explorable world builds the water after the buildings, rocks and bridges (none of them reads it), so its height
+// maps come from the workers while those build; the city, the tide and the mist read registry.water and come after
+export const EXPLORE_ORDER = ['terrain', 'yingzao', 'pagodas', 'karst', 'rocks', 'bridges', 'water', 'city', 'boats', 'tide', 'vegetation', 'mist'];
+
 /** season / night of a shot id from its look */
 export function seasonOf(id) {
   const L = LOOKS[id] || LOOKS[Number(id)] || {};
@@ -63,7 +67,7 @@ export async function buildWorld(engine) {
     engine.onProgress?.(done / total, name);
     if (engine.onProgress) await new Promise((r) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => setTimeout(r, 0)) : setTimeout(r, 0)));
   };
-  for (const name of MODULE_ORDER) {
+  for (const name of engine.explore ? EXPLORE_ORDER : MODULE_ORDER) {
     if (skip.includes(name) || (only.length && !only.includes(name))) continue;
     await tick(name);
     done += WEIGHT[name] || 1;
@@ -83,6 +87,9 @@ export async function buildWorld(engine) {
       await mod.build(engine);
       (engine.moduleRoots ||= {})[name] = engine.scene.children.filter((c) => !before.has(c));
       console.log(`[world] ${name} built in ${Math.round(performance.now() - t0)} ms`);
+      // the explorable world: worker jobs of later modules that depend on nothing built (the water's height maps, the
+      // tree cover's candidates), started now and done in the height workers while the buildings build
+      if (name === 'terrain' && engine.explore) for (const m of ['water', 'vegetation']) if (todo.includes(m)) import(`../modules/${m}.js`).then((x) => x.prefetch?.(engine)).catch(() => {});
     } catch (e) {
       console.error(`[world] module ${name} threw during build:`, e.stack || e);
     }

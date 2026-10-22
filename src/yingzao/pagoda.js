@@ -17,6 +17,7 @@ import { MeshBuilder, PAINT } from './geom.js';
 import { asm, done, composeLouge } from './buildings.js';
 import * as F from './fashi.js';
 import * as O from './ornaments.js';
+import { memoBuild } from './memo.js';
 
 /** storey list of a timber-eaved octagonal tower: side and column height shrink storey by storey (收分) */
 function towerStoreys({ n, grade, side, H, sideTaper, hTaper, puzuo, walls = 'pagoda', sideBuJian = 2, sides = 8, sideBays = 1, extra = {} }) {
@@ -209,5 +210,5 @@ export const PAGODAS = { leifeng, liuhe, tower, baochu, santan, stupa, jingchuan
 export function buildPagoda(kind, params = {}, opts = {}) {
   const fn = PAGODAS[kind];
   if (!fn) throw new Error('unknown pagoda kind ' + kind);
-  return fn(params, { name: kind, ...opts });
+  return memoBuild('pagoda:' + kind, params, opts, () => fn(params, { name: kind, ...opts }));
 }

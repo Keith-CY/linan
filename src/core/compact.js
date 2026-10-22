@@ -41,14 +41,16 @@ export function weldMesh(mesh) {
   if (!g.boundingBox) g.computeBoundingBox();
   if (!g.boundingSphere) g.computeBoundingSphere();
   const sizes = attrs.map((a) => a.itemSize), normalized = attrs.map((a) => a.normalized);
+  const users = (g.userData.weldUsers = [mesh]);
   const apply = (r) => {
     const w = new THREE.BufferGeometry();
     names.forEach((k, i) => w.setAttribute(k, new THREE.BufferAttribute(r.arrays[i], sizes[i], normalized[i])));
     w.setIndex(new THREE.BufferAttribute(r.index, 1));
     w.boundingBox = g.boundingBox; w.boundingSphere = g.boundingSphere;
-    w.name = g.name; w.userData = g.userData;
+    const { weldUsers, ...ud } = g.userData;
+    w.name = g.name; w.userData = ud;
     for (const gr of g.groups) w.addGroup(gr.start, gr.count, gr.materialIndex);
-    mesh.geometry = w;
+    for (const u of users) u.geometry = w;
     if (batch) { batch.verts += n; batch.kept += r.m; }
   };
   const arrays = attrs.map((a) => a.array);
@@ -56,6 +58,9 @@ export function weldMesh(mesh) {
     batch.jobs.push(pool().then((p) => (p.size ? p.weld(n, arrays, sizes) : weld(n, arrays.map((a, i) => [a, sizes[i]])))).then(apply));
   } else apply(weld(n, arrays.map((a, i) => [a, sizes[i]])));
 }
+
+/** a mesh sharing a geometry whose weld is still running (a clone of a built mesh) gets the welded one too */
+export function weldPending(mesh) { mesh.geometry?.userData.weldUsers?.push(mesh); }
 
 const EMPTY = new Float32Array(0);
 function dropArray() { this.array = this.array.constructor === Float32Array ? EMPTY : new this.array.constructor(0); }

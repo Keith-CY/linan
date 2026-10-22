@@ -46,13 +46,28 @@ function installHooks(engine, sys) {
   sys.onFrame = () => { const s = seasonFor(engine); if (s !== currentSeason()) applySeason(s); };
 }
 
+const coverCell = (engine) => 15 / Math.max(0.5, Math.sqrt(engine.quality.density ?? 1)) * 0.75;
+/** explore: the cover candidates (pure: the heightfield only) asked of the height workers early, so they are ready
+ *  when this module builds (src/world/index.js calls it once the water is built) */
+export function prefetch(engine) {
+  if (!engine.explore || engine.registry.coverPrefetch) return;
+  const pool = import('../explore/heightpool.js').then((m) => m.getHeightPool());
+  engine.registry.coverPrefetch = pool.then((p) => p.cover([-7000, -6000, 5500, 8000], coverCell(engine), { cx: -600, cz: 1200, R: 7200 }));
+  // the shots' hill cover (src/vegetation/placement.js cover): its candidates now, their ground from the workers
+  engine.registry.shotCoverPrefetch = Promise.all([pool, import('../vegetation/placement.js')]).then(([p, P]) => {
+    const plan = P.coverPlan(engine.quality.density ?? 1);
+    return p.ground(plan.x, plan.z).then((ground) => ({ plan, ground }));
+  });
+}
+
 /** explore: the shots' cover rules on a world lattice (src/explore/cover.js, candidates from the height workers) */
 async function exploreCover(engine, P) {
   const t0 = performance.now();
-  const { getHeightPool } = await import('../explore/heightpool.js');
   const { REC } = await import('../explore/cover.js');
-  const cell = 15 / Math.max(0.5, Math.sqrt(engine.quality.density ?? 1)) * 0.75;
-  const C = await getHeightPool().cover([-7000, -6000, 5500, 8000], cell, { cx: -600, cz: 1200, R: 7200 });
+  const cell = coverCell(engine);
+  prefetch(engine);
+  const C = await engine.registry.coverPrefetch;
+  delete engine.registry.coverPrefetch;
   const tC = performance.now();
   let n = 0;
   const KIND = { pine: 'pineM', willow: 'willow', peach: 'peach', camphor: 'camphor', maple: 'maple', ginkgo: 'ginkgo', broad: 'broad' };
@@ -71,7 +86,7 @@ async function exploreCover(engine, P) {
     }
     if (P.put(kind, x, z, hash01k(i, j, 8), { scale: 0.85 + 0.5 * hash01k(i, j, 7), r: cell * 0.32, y })) n++;
   }
-  console.log(`[vegetation] explore cover: ${C.length / REC} candidates (${Math.round(tC - t0)} ms in workers), ${n} trees placed, ${Math.round(performance.now() - t0)} ms`);
+  console.log(`[vegetation] explore cover: ${C.length / REC} candidates (${Math.round(tC - t0)} ms waiting for the workers), ${n} trees placed, ${Math.round(performance.now() - t0)} ms`);
   return n;
 }
 const hash01k = (i, j, k) => hash01(i, j, 9, k);
@@ -83,7 +98,8 @@ export async function build(engine) {
   const groundLib = buildGroundLibrary(sys, engine);
   lib.shrub = groundLib.shrub; // understorey bushes where a tree would block a view
   const { placeWorld } = await import('../vegetation/placement.js');
-  const stats = await placeWorld(engine, sys, lib);
+  const stats = await placeWorld(engine, sys, lib, { coverPre: engine.registry.shotCoverPrefetch || null });
+  delete engine.registry.shotCoverPrefetch;
   // lotus ponds (layout PLANTS with species 'lotus')
   const lotusZones = (LAYOUT.PLANTS || []).filter((z) => z.species === 'lotus');
   if (lotusZones.length) {

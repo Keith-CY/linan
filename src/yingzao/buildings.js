@@ -19,6 +19,7 @@ import { Assembly, ringVerts } from './building.js';
 import { makePlan } from './plan.js';
 import { PAINT } from './geom.js';
 import * as F from './fashi.js';
+import { memoBuild } from './memo.js';
 
 export function done(A, extra = {}) {
   const { group, info } = A.finish();
@@ -378,6 +379,9 @@ export const BUILDERS = { hall, chongyan, louge, ting, shuixie, qiao, lang, menw
 
 /** build any kind (or preset) by name */
 export function buildBuilding(kind, params = {}, opts = {}) {
+  return memoBuild(kind, params, opts, () => buildFresh(kind, params, opts));
+}
+function buildFresh(kind, params, opts) {
   if (PRESETS[kind]) {
     const [k, base] = PRESETS[kind];
     return BUILDERS[k](deepMerge(base, params), { name: kind, ...opts });

@@ -35,15 +35,15 @@ function signedDist(poly, x, y) {
   return inside ? d : -d;
 }
 
-/**
- * Inflate a closed 2D outline (normalised units, s along `dir`, y up) into a rounded solid.
- * @param {MeshBuilder} B
- * @param {number[][]} outline
- * @param {object} o  origin [x,y,z], dir [dx,dz] (horizontal), size (m per unit), thick (m, max), kind,
- *                    res (grid cells across), rim (fraction of thickness kept at the edge), power (profile),
- *                    relief(s, y, sd) → extra half-thickness in units of thick (grooves, fins, eyes), taper(y)
- */
-export function inflate(B, outline, { origin = [0, 0, 0], dir = [1, 0], size = 1, thick = 0.2, kind = PAINT.CERAMIC, res = 36, rim = 0.22, power = 0.55, relief = null, taper = null, smoothIters = 2 } = {}) {
+/** the 2D sheet of an outline (signed-distance grid, marched triangles, rim edges and their outward sides): the
+ *  same for every placement of the outline, so built once per outline, res and smoothing */
+const SHEETS = new WeakMap();
+function sheet2D(outline, res, smoothIters) {
+  let byRes = SHEETS.get(outline);
+  if (!byRes) SHEETS.set(outline, (byRes = new Map()));
+  const ck = res + '|' + smoothIters;
+  const hit = byRes.get(ck);
+  if (hit) return hit;
   const poly = chaikin(outline, smoothIters);
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const [x, y] of poly) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
@@ -77,6 +77,29 @@ export function inflate(B, outline, { origin = [0, 0, 0], dir = [1, 0], size = 1
     if (bnd.length === 2) edges.push(ins[0] || ins[1] ? [bnd[0], bnd[1]] : [bnd[0], bnd[1]]);
     else if (bnd.length === 4) { edges.push([bnd[0], bnd[1]]); edges.push([bnd[2], bnd[3]]); }
   }
+  // the outward side of each rim edge (away from the interior, sampled on the signed distance)
+  const edgeOut = edges.map(([a, b]) => {
+    const ex = (verts[b][0] - verts[a][0]), ey = (verts[b][1] - verts[a][1]);
+    const mx = (verts[a][0] + verts[b][0]) / 2, my = (verts[a][1] + verts[b][1]) / 2;
+    let ox = ey, oy = -ex; const ol = Math.hypot(ox, oy) || 1; ox /= ol; oy /= ol;
+    if (signedDist(poly, mx + ox * h * 0.3, my + oy * h * 0.3) > 0) { ox = -ox; oy = -oy; }
+    return [ox, oy, mx, my];
+  });
+  const out = { poly, h, verts, tris, edges, edgeOut, maxSd };
+  byRes.set(ck, out);
+  return out;
+}
+
+/**
+ * Inflate a closed 2D outline (normalised units, s along `dir`, y up) into a rounded solid.
+ * @param {MeshBuilder} B
+ * @param {number[][]} outline
+ * @param {object} o  origin [x,y,z], dir [dx,dz] (horizontal), size (m per unit), thick (m, max), kind,
+ *                    res (grid cells across), rim (fraction of thickness kept at the edge), power (profile),
+ *                    relief(s, y, sd) → extra half-thickness in units of thick (grooves, fins, eyes), taper(y)
+ */
+export function inflate(B, outline, { origin = [0, 0, 0], dir = [1, 0], size = 1, thick = 0.2, kind = PAINT.CERAMIC, res = 36, rim = 0.22, power = 0.55, relief = null, taper = null, smoothIters = 2 } = {}) {
+  const { verts, tris, edges, edgeOut, maxSd } = sheet2D(outline, res, smoothIters);
   // half thickness per vertex
   const ht = verts.map(([x, y, d]) => {
     let t = rim + (1 - rim) * Math.pow(Math.min(1, d / maxSd), power);
@@ -116,13 +139,11 @@ export function inflate(B, outline, { origin = [0, 0, 0], dir = [1, 0], size = 1
     if (!flip) { emit([a, b, c], 1); emit([a, c, b], -1); } else { emit([a, c, b], 1); emit([a, b, c], -1); }
   }
   // rim wall
-  for (const [a, b] of edges) {
+  for (let ei = 0; ei < edges.length; ei++) {
+    const [a, b] = edges[ei];
     const A1 = P3(a, 1), B1 = P3(b, 1), A0 = P3(a, -1), B0 = P3(b, -1);
-    const ex = (verts[b][0] - verts[a][0]), ey = (verts[b][1] - verts[a][1]);
-    // outward in 2D: perpendicular; choose the side away from the interior using sd gradient (cheap: sample)
-    const mx = (verts[a][0] + verts[b][0]) / 2, my = (verts[a][1] + verts[b][1]) / 2;
-    let ox = ey, oy = -ex; const ol = Math.hypot(ox, oy) || 1; ox /= ol; oy /= ol;
-    if (signedDist(poly, mx + ox * h * 0.3, my + oy * h * 0.3) > 0) { ox = -ox; oy = -oy; }
+    // outward in 2D: perpendicular, on the side away from the interior (sheet2D)
+    const [ox, oy, mx, my] = edgeOut[ei];
     const n3 = [dx * ox, oy, dz * ox];
     const quadOut = (p, q, r, s) => {
       // orient so the face normal follows n3
