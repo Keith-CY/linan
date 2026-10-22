@@ -24,6 +24,7 @@
 //   F.buildNext(cameraPosition)      while standing still: the nearest missing middle level (true when one was built)
 //   F.reset()                        originals back, middle levels hidden (src/explore/still.js sets its own levels)
 import * as THREE from 'three';
+import { releaseOnUpload, uploadNow } from '../core/compact.js';
 
 export const BAND = 0.22;          // half width of the band as a fraction of the switch distance
 export const NEAR_D = 160, NEAR_BAND = 0.14;   // lod 0 → lod 1 (the middle level): both drawn over 138–182 m
@@ -175,6 +176,7 @@ export class LodFade {
       s.near.parent.add(g);
       g.updateMatrixWorld(true);
       this.engine.ensurePatched();          // atmosphere / shadows and the ink G-buffer outputs (shared materials: no new programs)
+      if (this.engine.params.get('keepArrays') !== '1') { releaseOnUpload(g); uploadNow(this.engine, [g]); }
       best.levels[1] = this._level(g);
       s.mid = g;
       this.built++;

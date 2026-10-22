@@ -111,9 +111,15 @@ export class StillView {
     // the forest floor under the instanced trees: a still keeps it round the first shot camera
     const TZ = R.terrain?.material?.userData?.cgUniforms?.uTreeZone;
     if (TZ && shot) { sv.tz = TZ.value.clone(); TZ.value.set(SHOTS[0].pos[0], SHOTS[0].pos[2], 900, 0); }
-    // plants: the stills' buckets for this camera
+    // plants: the stills' buckets for this camera (every plant in the frustum: a few hundred ms of work, in slices
+    // a frame apart so the page keeps answering; moving again cancels it)
     const veg = R.vegetation?.sys;
-    if (veg) { veg.still = { noCover: !!shot }; veg.resetHistory(); veg.update(cam); }
+    if (veg) {
+      veg.still = { noCover: !!shot }; veg.resetHistory();
+      const st = await veg.updateSliced(cam);
+      if (token !== this.token) return false;
+      if (!st) veg.update(cam);     // (another re-bucket ran meanwhile: this one at once)
+    }
     e.ensurePatched();
     return true;
   }

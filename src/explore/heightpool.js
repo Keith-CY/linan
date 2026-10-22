@@ -6,11 +6,14 @@
 //   const f = await pool.farm([x0, z0, x1, z1], opts)         → the countryside's plots (src/explore/farm.js farmPlan), in
 //                                                               slabs at low priority (terrain patches go first)
 //   const c = await pool.farmCovers(plan, pts)                → Uint8Array: which of the points [x, z, …] stand on the fields
+//   const w = await pool.weld(n, arrays, sizes)               → src/core/weld.js weld() of n vertices (the arrays are
+//                                                               transferred: detached here until the result comes back)
 // Falls back to the main thread when module workers are unavailable.
 import { heightAt } from '../world/heightfield.js';
 import { meshLeaf } from '../terrain/mesh.js';
 import { coverCandidates } from './cover.js';
 import { farmPlan, farmCovers } from './farm.js';
+import { weld } from '../core/weld.js';
 
 let POOL = null;
 
@@ -73,6 +76,7 @@ class HeightPool {
     if (msg.op === 'cover') return { data: coverCandidates(msg) };
     if (msg.op === 'farm') return farmPlan(msg);
     if (msg.op === 'farmCovers') return { data: farmCovers(msg) };
+    if (msg.op === 'weld') return weld(msg.n, msg.arrays.map((a, i) => [a, msg.sizes[i]]));
     const { x0, z0, dx, dz, W, j0, j1 } = msg;
     const data = new Float32Array(W * (j1 - j0));
     for (let j = j0; j < j1; j++) for (let i = 0; i < W; i++) data[(j - j0) * W + i] = heightAt(x0 + (i + 0.5) * dx, z0 + (j + 0.5) * dz);
@@ -110,6 +114,11 @@ class HeightPool {
   async farmCovers(plan, pts) {
     const r = await this._run({ op: 'farmCovers', low: true, plots: plan.plots, tea: plan.tea, trees: plan.trees, pts }, [pts.buffer]);
     return r.data;
+  }
+
+  weld(n, arrays, sizes) {
+    const own = arrays.map((a) => (a.byteOffset === 0 && a.byteLength === a.buffer.byteLength ? a : a.slice()));
+    return this._run({ op: 'weld', n, arrays: own, sizes }, own.map((a) => a.buffer));
   }
 
   leaf(lf, N = 32, low = false) { return this._run({ op: 'leaf', x0: lf.x0, z0: lf.z0, size: lf.size, N, low }); }

@@ -18,6 +18,7 @@ import { bakeAO } from './ao.js';
 import * as F from './fashi.js';
 import * as O from './ornaments.js';
 import { RNG } from '../core/rng.js';
+import { weldMesh } from '../core/compact.js';
 
 const FAMILIES = ['wood', 'plaster', 'stone', 'tile', 'dark', 'glow', 'metal'];
 const T4 = (x, y, z) => new THREE.Matrix4().makeTranslation(x, y, z);
@@ -369,6 +370,7 @@ export class Assembly {
       const mesh = new THREE.Mesh(B.toGeometry(), mats[k]);
       mesh.name = `${this.name}:${k}`;
       mesh.castShadow = k !== 'dark' && k !== 'glow'; mesh.receiveShadow = true;
+      weldMesh(mesh);
       group.add(mesh);
       tris += B.count / 3; calls++;
     }
@@ -378,6 +380,7 @@ export class Assembly {
       u.mats.forEach((M, i) => im.setMatrixAt(i, M));
       im.instanceMatrix.needsUpdate = true;
       im.computeBoundingSphere();
+      weldMesh(im);
       im.name = `${this.name}:puzuo:${key.split('|')[0]}`;
       im.castShadow = true; im.receiveShadow = true;
       group.add(im);

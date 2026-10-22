@@ -163,7 +163,11 @@ export class Lighting {
     const prev = scene.environment;
     const rt = this.pmrem.fromScene(this.envScene, 0, 0.1, 100);
     SKY.uEnvPass.value = 0;
-    if (prev && prev !== rt.texture) prev.dispose?.();
+    // the previous environment's whole target (its texture alone left the framebuffer and depth buffer behind: ~9 MB
+    // of GPU memory per look applied)
+    if (this.envRT && this.envRT !== rt) this.envRT.dispose();
+    else if (prev && prev !== rt.texture) prev.dispose?.();
+    this.envRT = rt;
     scene.environment = rt.texture;
     scene.environmentIntensity = this.engine.envIntensity ?? 1.0;
     if (this.engine.registry) this.engine.registry.skyEnvScale = SKY.uEnvScale.value;

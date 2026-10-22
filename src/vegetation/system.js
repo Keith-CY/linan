@@ -9,9 +9,16 @@ import { depthFor } from './materials.js';
 
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
 const _Y = new THREE.Vector3(0, 1, 0), _up = new THREE.Vector3(), _qt = new THREE.Quaternion();
-const _frustum = new THREE.Frustum(), _pm = new THREE.Matrix4(), _sph = new THREE.Sphere();
+const _pm = new THREE.Matrix4();
 const MAX_TRIS = 400000;
 const FAR_SECTORS = 8;
+const PAGE0 = 128;     // first capacity of a bucket page (it doubles as it fills, up to its LOD's page size)
+// the explorable world's far impostors: plants beyond FAR_NEAR m of an anchor, refilled when the camera has travelled
+// FAR_MOVE m from it (in slices over several frames, src/explore calls step() every frame), at once after a teleport
+// (farInvalidate) or a jump of FAR_JUMP m
+const FAR_NEAR = 750, FAR_MOVE = 90, FAR_JUMP = 3000;
+const OCC_BUDGET = 1500;   // terrain-occlusion tests per re-bucket while walking (_occCached)
+const instAttr = (n, k) => { const a = new THREE.InstancedBufferAttribute(new Float32Array(n * k), k); a.setUsage(THREE.DynamicDrawUsage); return a; };
 const PARTS = ['bark', 'inner', 'blob', 'card', 'ribbon', 'flower', 'bb'];
 const partsOf = (lod) => [...PARTS.filter((p) => lod[p]), ...Object.keys(lod).filter((k) => !PARTS.includes(k) && k !== 'tris' && lod[k]?.isBufferGeometry)];
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -69,8 +76,9 @@ export class VegSystem {
 
   finalize() {
     for (const v of this.variants) {
-      const n = v.inst.length;
-      if (!n) continue;
+      // after this the instances live in the typed arrays below (v.n of them); the per-plant objects are let go
+      const n = (v.n = v.inst.length);
+      if (!n) { v.inst = []; continue; }
       v.mat = new Float32Array(n * 16);
       v.col = new Float32Array(n * 3);
       v.ctr = new Float32Array(n * 4);
@@ -87,6 +95,7 @@ export class VegSystem {
         v.col.set(it.tint, i * 3);
         v.ctr[i * 4] = it.x; v.ctr[i * 4 + 1] = it.y + it.h * (v.ctrK ?? 0.5); v.ctr[i * 4 + 2] = it.z; v.ctr[i * 4 + 3] = it.h;
       }
+      v.inst = [];
       v.cells = buildCells(v.ctr, n);
       v.lodMeshes = v.lods.map((lod, l) => ({ l, lod, pages: [], page: clamp(Math.floor(MAX_TRIS / Math.max(1, lod.tris || 1)), 16, 8192) }));
       // LOD1 beyond the shadow distance: same geometry, pages that cast no shadow (far cascades are too coarse to show them)
@@ -94,10 +103,11 @@ export class VegSystem {
       // the explorable world: plants beyond FAR_NEAR m live in their own impostor pages, filled all round the camera and
       // refreshed only when the camera has travelled FAR_MOVE m (a full re-bucket of 130 k plants is ~30 ms)
       // eight sectors of azimuth round the anchor, shown only when they face the camera (farVisibility)
+      // two sets of them: the one drawn (farL3) and the one being refilled (farL3b), swapped when the refill is done
       if (this.engine.explore) {
         const ll = v.lods.length - 1;
-        v.farL3 = [];
-        for (let sct = 0; sct < FAR_SECTORS; sct++) { v.farL3.push(v.lodMeshes.length); v.lodMeshes.push({ l: ll, lod: v.lods[ll], pages: [], page: v.lodMeshes[ll].page, noShadow: true, far: true, sector: sct }); }
+        v.farL3 = []; v.farL3b = [];
+        for (const set of [v.farL3, v.farL3b]) for (let sct = 0; sct < FAR_SECTORS; sct++) { set.push(v.lodMeshes.length); v.lodMeshes.push({ l: ll, lod: v.lods[ll], pages: [], page: v.lodMeshes[ll].page, noShadow: true, far: true, sector: sct }); }
       }
       this.stats.instances += n;
     }
@@ -119,12 +129,26 @@ export class VegSystem {
     this.group.add(sentinel);
   }
 
-  _newPage(v, L) {
-    const cap = L.page;
-    const im = new THREE.InstancedBufferAttribute(new Float32Array(cap * 16), 16);
-    im.setUsage(THREE.DynamicDrawUsage);
-    const ic = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
-    ic.setUsage(THREE.DynamicDrawUsage);
+  /** the page of slot k of a LOD's buckets: pages hold up to L.page instances each but start small and double as
+   *  they fill (a page sized for its whole capacity up front held ~4 slots for every plant drawn) */
+  _pageFor(v, L, pi, s) {
+    const pg = L.pages[pi] || this._newPage(v, L, Math.min(L.page, PAGE0));
+    if (s >= pg.cap) {
+      let cap = pg.cap;
+      while (cap <= s) cap *= 2;
+      cap = Math.min(cap, L.page);
+      const im = instAttr(cap, 16), ic = instAttr(cap, 3);
+      im.array.set(pg.im.array); ic.array.set(pg.ic.array);
+      // the old buffers off the GPU (three.js drops an instanced mesh's instance buffers on its dispose event)
+      for (const m of pg.parts) m.dispose();
+      for (const m of pg.parts) { m.instanceMatrix = im; m.instanceColor = ic; }
+      pg.im = im; pg.ic = ic; pg.cap = cap;
+    }
+    return pg;
+  }
+
+  _newPage(v, L, cap = L.page) {
+    const im = instAttr(cap, 16), ic = instAttr(cap, 3);
     const parts = [];
     const P = this.engine.params;
     for (const part of partsOf(L.lod)) {
@@ -133,7 +157,7 @@ export class VegSystem {
       const mat = v.materials[part];
       if (!mat) continue;
       if (P?.get?.('vegNoCards') && part === 'card') continue;
-      const mesh = new THREE.InstancedMesh(geo, mat, cap);
+      const mesh = new THREE.InstancedMesh(geo, mat, 0);
       mesh.instanceMatrix = im;
       mesh.instanceColor = ic;
       mesh.count = 0;
@@ -156,7 +180,7 @@ export class VegSystem {
       for (const part of castParts) {
         const geo = src[part], mat = v.materials[part];
         if (!geo || !mat || part === 'petal' || part === 'flower') continue;
-        const proxy = new THREE.InstancedMesh(geo, mat, cap);
+        const proxy = new THREE.InstancedMesh(geo, mat, 0);
         proxy.instanceMatrix = im; proxy.instanceColor = ic;
         proxy.count = 0; proxy.visible = false; proxy.frustumCulled = false;
         proxy.layers.set(SHADOW_LAYER);
@@ -174,7 +198,8 @@ export class VegSystem {
   }
 
   /** forget LOD history (a camera cut): stills are then independent of previously rendered shots */
-  resetHistory() { this.lastCam = null; this.farAnchor = null; for (const v of this.variants) if (v.lastLod) v.lastLod.fill(-1); }
+  resetHistory() { this.lastCam = null; for (const v of this.variants) if (v.lastLod) v.lastLod.fill(-1); }
+  // (the explorable world's far impostors stay: they depend only on where they were filled, see _farCheck)
 
   maybeUpdate(camera = this.engine.camera) {
     const c = camera;
@@ -197,6 +222,8 @@ export class VegSystem {
    * view would exceed it, the LOD distances shrink (≤ 3 retries).
    */
   update(camera = this.engine.camera) {
+    this._token = (this._token || 0) + 1;     // a re-bucket in slices (updateSliced) still running gives up
+    this._occBudget = OCC_BUDGET;
     const t0 = performance.now();
     const resK = clamp((this.engine.height || 928) / 928, 1, 2.4);
     // still mode: the stills' own (high quality) budget
@@ -225,6 +252,48 @@ export class VegSystem {
   }
 
   _update(camera, kScale, noHyst) {
+    const g = this._bucket(camera, kScale, noHyst, null);
+    let r = g.next();
+    while (!r.done) r = g.next();
+    return r.value;
+  }
+
+  /**
+   * the same re-bucket in slices of about budgetMs, a frame apart (src/explore/still.js: a still's plants are all of
+   * the world's in its frustum, a few hundred ms of work, while the page stays responsive). Resolves to the stats,
+   * or null when update() ran meanwhile (it wins).
+   */
+  async updateSliced(camera = this.engine.camera, budgetMs = 6) {
+    const token = (this._token = (this._token || 0) + 1);
+    const J = { deadline: 0 };
+    const pass = async (k, noHyst) => {
+      const g = this._bucket(camera, k, noHyst, J);
+      for (;;) {
+        J.deadline = performance.now() + budgetMs;
+        const r = g.next();
+        if (r.done) return r.value;
+        await new Promise((res) => requestAnimationFrame(() => res()));
+        if (token !== this._token) return null;
+      }
+    };
+    const resK = clamp((this.engine.height || 928) / 928, 1, 2.4);
+    const qn = this.still ? 'high' : this.engine.quality.name;
+    const budget = Number(this.engine.params?.get?.('vegTris')) || (qn === 'ultra' ? 11e6 : qn === 'high' ? 8.5e6 : qn === 'explore' ? 3e6 : 6e6) * resK;
+    let k = 1, st = await pass(1, false);
+    for (let i = 0; st && i < 3 && this.forceLod === undefined && st.budgetTris > budget; i++) {
+      k = Math.max(0.35, k * Math.sqrt(budget / st.budgetTris) * 0.94);
+      st = await pass(k, true);
+    }
+    if (!st) return null;
+    st.lodScale = +k.toFixed(3);
+    this.engine.stats.veg = { ...st };
+    return st;
+  }
+
+  *_bucket(camera, kScale, noHyst, J) {
+    // (its own frustum: a sliced re-bucket must not see another one's)
+    const _frustum = new THREE.Frustum(), _sph = new THREE.Sphere();
+    let nSlice = 0;
     const c = camera;
     c.updateMatrixWorld(true);
     this.lastCam = [c.position.x, c.position.y, c.position.z, c.quaternion.x, c.quaternion.y, c.quaternion.z, c.quaternion.w, c.fov];
@@ -250,23 +319,21 @@ export class VegSystem {
     const ex = !!this.engine.explore && !this.still;
     // still mode at a viewpoint: the explorable world's own cover (marked v.exMask) stays out, as in the stills
     const noEx = !!this.still?.noCover;
-    const FAR_NEAR = 750, FAR_MOVE = 90;
-    const A = this.farAnchor;
-    const farRefresh = ex && (!A || Math.hypot(cx - A.x, cz - A.z) > FAR_MOVE || Math.abs(cy - A.y) > 60);
-    if (farRefresh) this.farAnchor = { x: cx, y: cy, z: cz };
+    if (ex) this._farCheck(cx, cy, cz, focalPx, lodK / kScale);
+    else if (this.engine.explore && this._sectorKey !== null) {
+      // a still (src/explore/still.js) has no far impostors: hidden, kept for its end (farVisibility shows them again)
+      for (const v of this.variants) if (v.farL3) for (const li of [...v.farL3, ...v.farL3b]) for (const pg of v.lodMeshes[li].pages) for (const m of pg.parts) m.visible = false;
+      this._sectorKey = null;
+    }
     const forced = this.engine.params?.get?.('vegLod');
     const force = this.forceLod !== undefined ? this.forceLod : forced !== null && forced !== undefined && forced !== '' ? Number(forced) : undefined;
     for (const v of this.variants) {
-      if (!v.inst.length) continue;
-      const n = v.inst.length;
+      if (!v.n) continue;
+      const n = v.n;
       const counts = v.lodMeshes.map(() => 0);
       const px = v.px;
       const hidden = v.hidden?.();
       // spatial cells first: a cell wholly outside the (shadow-extended) frustum skips all of its plants
-      if (farRefresh) {
-        v.nearCells = []; v.farCells = [];
-        for (const C of v.cells) (Math.hypot(C.x - cx, C.z - cz) - C.r < FAR_NEAR ? v.nearCells : v.farCells).push(C);
-      }
       const cells = hidden ? [] : ex ? v.nearCells : v.cells;
       for (let ci = 0; ci < cells.length; ci++) {
         const C = cells[ci];
@@ -275,6 +342,7 @@ export class VegSystem {
         const idx = C.idx;
       for (let ii = 0; ii < idx.length; ii++) {
         const i = idx[ii];
+        if (J && (++nSlice & 511) === 0 && performance.now() > J.deadline) yield;
         if (noEx && v.exMask?.[i]) continue;
         const x = v.ctr[i * 4], y = v.ctr[i * 4 + 1], z = v.ctr[i * 4 + 2], h = v.ctr[i * 4 + 3];
         const r = h * (v.radK ?? 0.6) + 1.0;
@@ -309,43 +377,21 @@ export class VegSystem {
         const L = v.lodMeshes[li];
         const k = counts[li]++;
         const pi = Math.floor(k / L.page), s = k - pi * L.page;
-        const pg = L.pages[pi] || this._newPage(v, L);
+        const pg = L.pages[pi] && s < L.pages[pi].cap ? L.pages[pi] : this._pageFor(v, L, pi, s);
         const dst = pg.im.array, src = v.mat, o = s * 16, q = i * 16;
         for (let t = 0; t < 16; t++) dst[o + t] = src[q + t];
         pg.ic.array[s * 3] = v.col[i * 3]; pg.ic.array[s * 3 + 1] = v.col[i * 3 + 1]; pg.ic.array[s * 3 + 2] = v.col[i * 3 + 2];
       }
       }
-      if (farRefresh && !hidden) {
-        // far plants: every direction, impostors only, culled by projected size
-        for (const C of v.farCells) {
-          const idx = C.idx;
-          for (let ii = 0; ii < idx.length; ii++) {
-            const i = idx[ii];
-            const x = v.ctr[i * 4], y = v.ctr[i * 4 + 1], z = v.ctr[i * 4 + 2], h = v.ctr[i * 4 + 3];
-            const ddx = x - cx, ddy = y - cy, ddz = z - cz;
-            const d = Math.max(0.1, Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) - h * 0.25);
-            if ((h * focalPx) / d * lodK < (v.cullPx ?? 0.6)) continue;
-            let sct = Math.floor(((Math.atan2(ddx, ddz) + Math.PI) / (2 * Math.PI)) * FAR_SECTORS);
-            if (sct >= FAR_SECTORS) sct = FAR_SECTORS - 1;
-            const li = v.farL3[sct], L = v.lodMeshes[li];
-            const k = counts[li]++;
-            const pi = Math.floor(k / L.page), s = k - pi * L.page;
-            const pg = L.pages[pi] || this._newPage(v, L);
-            const dst = pg.im.array, src = v.mat, o = s * 16, q = i * 16;
-            for (let t = 0; t < 16; t++) dst[o + t] = src[q + t];
-            pg.ic.array[s * 3] = v.col[i * 3]; pg.ic.array[s * 3 + 1] = v.col[i * 3 + 1]; pg.ic.array[s * 3 + 2] = v.col[i * 3 + 2];
-          }
-        }
-      }
       for (let l = 0; l < v.lodMeshes.length; l++) {
         const L = v.lodMeshes[l];
-        if (L.far && ex && !farRefresh && !hidden) { drawn += L.count || 0; tris += (L.count || 0) * (L.lod.tris || 0); farTris += (L.count || 0) * (L.lod.tris || 0); continue; }
+        if (L.far) { if (ex) { drawn += L.count || 0; tris += (L.count || 0) * (L.lod.tris || 0); farTris += (L.count || 0) * (L.lod.tris || 0); } continue; }
         L.count = counts[l];
         for (let pi = 0; pi < L.pages.length; pi++) {
           const pg = L.pages[pi];
           const cnt = clamp(counts[l] - pi * L.page, 0, L.page);
           pg.cnt = cnt;
-          for (const m of pg.parts) { m.count = cnt; m.visible = cnt > 0 && (L.sector === undefined || this._sectorOn?.[L.sector] !== false); }
+          for (const m of pg.parts) { m.count = cnt; m.visible = cnt > 0; }
           pg.im.clearUpdateRanges(); pg.ic.clearUpdateRanges();
           if (cnt) {
             pg.im.addUpdateRange(0, cnt * 16); pg.ic.addUpdateRange(0, cnt * 3);
@@ -365,14 +411,157 @@ export class VegSystem {
     return { ...this.stats };
   }
 
-  /** explore: the terrain occlusion of one plant, re-tested once per 25 m of camera travel (7 height samples each) */
+  /** explore: start a refill of the far impostors round (cx, cy, cz) when the camera has travelled FAR_MOVE m from
+   *  the drawn set's anchor; refill at once when there is none or the camera jumped FAR_JUMP m */
+  _farCheck(cx, cy, cz, focalPx, lodK) {
+    const A = this.farAnchor;
+    const d = A ? Math.hypot(cx - A.x, cz - A.z) : Infinity, dy = A ? Math.abs(cy - A.y) : Infinity;
+    if (d > FAR_JUMP || dy > 300) {
+      this._farCancel();
+      const J = this._farJob(cx, cy, cz, focalPx, lodK);
+      J.deadline = Infinity;
+      while (!J.gen.next().done);
+      this._farSwap(J);
+    } else if (!this.farJob && (d > FAR_MOVE || dy > 60)) this.farJob = this._farJob(cx, cy, cz, focalPx, lodK);
+  }
+
+  /** explore: the camera jumps (a teleport): the far impostors are refilled at once on the next re-bucket */
+  farInvalidate() { this._farCancel(); this.farAnchor = null; }
+
+  _farJob(x, y, z, focalPx, lodK) {
+    const J = { x, y, z, focalPx, lodK, near: [], far: [], counts: [], hidden: [], shown: [], dirty: new Set(), deadline: 0 };
+    J.gen = this._farFill(J);
+    return J;
+  }
+
+  _farCancel() {
+    const J = this.farJob;
+    if (!J) return;
+    for (const pg of J.shown) for (const m of pg.parts) m.visible = false;
+    this.farJob = null;
+  }
+
+  /**
+   * explore: the far refill's next slice (call every frame; about budgetMs of work). Every plant beyond FAR_NEAR m of
+   * the new anchor, in every direction, impostors only, culled by projected size, into the set that is not drawn; the
+   * slices' instance data are uploaded as they are written (the pages shown for one frame with no instances), and
+   * the two sets swap once all are in. Returns true on the frame the new set is drawn.
+   */
+  step(budgetMs = 3) {
+    const J = this.farJob;
+    if (!J || this.still) return false;
+    for (const pg of J.shown) for (const m of pg.parts) m.visible = false;
+    J.shown.length = 0;
+    // (a camera already far past the anchor, flying: bigger slices so the refill keeps up)
+    const c = this.engine.camera.position, A = this.farAnchor;
+    const behind = A ? Math.hypot(c.x - A.x, c.z - A.z) : 0;
+    J.deadline = performance.now() + budgetMs * (behind > 300 ? 2.5 : 1);
+    const t0 = performance.now();
+    if (!J.gen.next().done) { this._stepMax(performance.now() - t0, 'slice'); return false; }
+    this.farJob = null;
+    this._farSwap(J);
+    const t1 = performance.now();
+    // the near buckets for the new near cells
+    this.lastCam = null;
+    this.update(this.engine.camera);
+    this._stepMax(t1 - t0, 'last slice + swap'); this._stepMax(performance.now() - t1, 'near after swap');
+    return true;
+  }
+
+  _stepMax(ms, k) { const S = (this.stepStats ||= {}); if (!(S[k] >= ms)) S[k] = +ms.toFixed(1); }
+
+  *_farFill(J) {
+    const cx = J.x, cy = J.y, cz = J.z, focalPx = J.focalPx, lodK = J.lodK;
+    let n = 0;
+    for (let vi = 0; vi < this.variants.length; vi++) {
+      const v = this.variants[vi];
+      if (!v.n || !v.farL3) continue;
+      const near = [], far = [];
+      for (const C of v.cells) (Math.hypot(C.x - cx, C.z - cz) - C.r < FAR_NEAR ? near : far).push(C);
+      J.near[vi] = near; J.far[vi] = far;
+      const counts = (J.counts[vi] = new Int32Array(FAR_SECTORS));
+      const hidden = (J.hidden[vi] = !!v.hidden?.());
+      if (hidden) continue;
+      const cull = v.cullPx ?? 0.6;
+      for (const C of far) {
+        const idx = C.idx;
+        for (let ii = 0; ii < idx.length; ii++) {
+          const i = idx[ii];
+          const x = v.ctr[i * 4], y = v.ctr[i * 4 + 1], z = v.ctr[i * 4 + 2], h = v.ctr[i * 4 + 3];
+          const ddx = x - cx, ddy = y - cy, ddz = z - cz;
+          const d = Math.max(0.1, Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) - h * 0.25);
+          if ((h * focalPx) / d * lodK < cull) continue;
+          let sct = Math.floor(((Math.atan2(ddx, ddz) + Math.PI) / (2 * Math.PI)) * FAR_SECTORS);
+          if (sct >= FAR_SECTORS) sct = FAR_SECTORS - 1;
+          const L = v.lodMeshes[v.farL3b[sct]];
+          const k = counts[sct]++;
+          const pi = Math.floor(k / L.page), s = k - pi * L.page;
+          const pg = L.pages[pi] && s < L.pages[pi].cap ? L.pages[pi] : this._pageFor(v, L, pi, s);
+          const dst = pg.im.array, src = v.mat, o = s * 16, q = i * 16;
+          for (let t = 0; t < 16; t++) dst[o + t] = src[q + t];
+          pg.ic.array[s * 3] = v.col[i * 3]; pg.ic.array[s * 3 + 1] = v.col[i * 3 + 1]; pg.ic.array[s * 3 + 2] = v.col[i * 3 + 2];
+          if (!J.dirty.has(pg)) { J.dirty.add(pg); pg.lo = s; }
+          pg.hi = s + 1;
+          if ((++n & 1023) === 0 && performance.now() > J.deadline) { this._farFlush(J); yield; }
+        }
+      }
+    }
+    this._farFlush(J);
+  }
+
+  /** the far pages written in this slice: their new ranges to the GPU with the next frame (shown, drawing nothing) */
+  _farFlush(J) {
+    for (const pg of J.dirty) {
+      pg.im.addUpdateRange(pg.lo * 16, (pg.hi - pg.lo) * 16); pg.ic.addUpdateRange(pg.lo * 3, (pg.hi - pg.lo) * 3);
+      pg.im.needsUpdate = true; pg.ic.needsUpdate = true;
+      for (const m of pg.parts) { m.count = 0; m.visible = true; }
+      J.shown.push(pg);
+    }
+    J.dirty.clear();
+  }
+
+  /** the refilled far set drawn, the old one hidden (refilled next time) */
+  _farSwap(J) {
+    for (let vi = 0; vi < this.variants.length; vi++) {
+      const v = this.variants[vi];
+      if (!v.farL3 || !J.near[vi]) continue;
+      v.nearCells = J.near[vi]; v.farCells = J.far[vi];
+      const old = v.farL3;
+      v.farL3 = v.farL3b; v.farL3b = old;
+      for (const li of old) { const L = v.lodMeshes[li]; L.count = 0; for (const pg of L.pages) { pg.cnt = 0; for (const m of pg.parts) { m.count = 0; m.visible = false; } } }
+      for (let sct = 0; sct < FAR_SECTORS; sct++) {
+        const L = v.lodMeshes[v.farL3[sct]], c = J.hidden[vi] ? 0 : J.counts[vi][sct];
+        L.count = c;
+        for (let pi = 0; pi < L.pages.length; pi++) {
+          const pg = L.pages[pi], cnt = clamp(c - pi * L.page, 0, L.page);
+          pg.cnt = cnt;
+          for (const m of pg.parts) { m.count = cnt; m.visible = false; }
+        }
+      }
+    }
+    for (const pg of J.shown) for (const m of pg.parts) m.visible = (m.count || 0) > 0;
+    J.shown.length = 0;
+    this.farAnchor = { x: J.x, y: J.y, z: J.z };
+    this._sectorKey = null;
+    if (this.engine.camera) this.farVisibility(this.engine.camera);
+  }
+
+  /**
+   * explore: the terrain occlusion of one plant (7 height samples), re-tested once the camera is 25 m from where it was
+   * last tested, at most OCC_BUDGET tests per re-bucket (every plant tested at once, as before, was a 20-70 ms frame in
+   * the forests every 25 m); a plant not yet tested counts as visible, one waiting for its re-test keeps its last answer
+   */
   _occCached(v, i, cx, cy, cz, x, y, z) {
-    const A = this._occA;
-    if (!A || Math.hypot(cx - A.x, cz - A.z) > 25 || Math.abs(cy - A.y) > 10) this._occA = { x: cx, y: cy, z: cz, id: ((A?.id || 0) + 1) & 0x7fffffff };
-    const id = this._occA.id;
-    if (!v.occId) { v.occId = new Int32Array(v.inst.length); v.occV = new Uint8Array(v.inst.length); }
-    if (v.occId[i] !== id) { v.occId[i] = id; v.occV[i] = this.occluded(cx, cy, cz, x, y, z) ? 1 : 0; }
-    return v.occV[i] === 1;
+    if (!v.occV) { v.occV = new Uint8Array(v.n); v.occP = new Float32Array(v.n * 3); }
+    const st = v.occV[i], P = v.occP;
+    if (st) {
+      const dx = cx - P[i * 3], dz = cz - P[i * 3 + 2];
+      if ((dx * dx + dz * dz < 625 && Math.abs(cy - P[i * 3 + 1]) < 10) || this._occBudget <= 0) return st === 2;
+    } else if (this._occBudget <= 0) return false;
+    this._occBudget--;
+    const occ = this.occluded(cx, cy, cz, x, y, z);
+    v.occV[i] = occ ? 2 : 1; P[i * 3] = cx; P[i * 3 + 1] = cy; P[i * 3 + 2] = cz;
+    return occ;
   }
 
   /** explore: show the far sectors that face the camera (cheap; call every frame) */
@@ -394,9 +583,9 @@ export class VegSystem {
     if (key === this._sectorKey) return;
     this._sectorKey = key; this._sectorOn = on;
     for (const v of this.variants) {
-      if (!v.lodMeshes) continue;
-      for (const L of v.lodMeshes) {
-        if (L.sector === undefined) continue;
+      if (!v.farL3) continue;
+      for (const li of v.farL3) {
+        const L = v.lodMeshes[li];
         for (const pg of L.pages) for (const m of pg.parts) m.visible = (pg.cnt || 0) > 0 && on[L.sector];
       }
     }

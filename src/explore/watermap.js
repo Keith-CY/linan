@@ -71,7 +71,8 @@ async function recapture(engine, map, sets, cache) {
   for (let b = 0; b < list.length; b += BATCH) {
     const part = await Promise.all(list.slice(b, b + BATCH).map((lf) => {
       const hit = cache?.get(`${lf.x0},${lf.z0},${lf.size}/${SET.N}`);
-      if (hit) return { geo: hit.mesh.geometry, own: false };
+      // pinned until drawn: the stream may not evict (and dispose) it meanwhile
+      if (hit) { hit.mesh.userData.pins = (hit.mesh.userData.pins || 0) + 1; return { geo: hit.mesh.geometry, own: false, hit }; }
       return pool.leaf(lf, SET.N, true).then((m) => {
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.BufferAttribute(m.position, 3));
@@ -82,7 +83,7 @@ async function recapture(engine, map, sets, cache) {
     const scene = new THREE.Scene();
     for (const p of part) { const m = new THREE.Mesh(p.geo, mat); m.frustumCulled = false; m.matrixAutoUpdate = false; scene.add(m); }
     draw(() => r.render(scene, cam));
-    for (const p of part) if (p.own) p.geo.dispose();
+    for (const p of part) { if (p.own) p.geo.dispose(); else p.hit.mesh.userData.pins--; }
     await yieldFrame();
   }
   // read back in strips; row 0 of the target is world z1 (as src/water/heightmap.js stores it: row j ↔ z0 + (j + .5) dz)

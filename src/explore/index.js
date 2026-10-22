@@ -11,7 +11,8 @@
 // still's state, painted with the full still pipeline (src/ink/index.js renderStill) and faded in; at one of the ten
 // viewpoints, not moved since the teleport, it is the offline still itself. Moving again fades back to the live frame.
 // Live frames go through FXAA and are upscaled from the adaptive render scale (src/ink/index.js present). Streaming: the terrain is re-planned
-// around the camera (src/explore/terrain.js), the vegetation re-buckets its LODs from the moving camera (VegSystem),
+// around the camera (src/explore/terrain.js), the vegetation re-buckets its LODs from the moving camera (VegSystem; its
+// far impostors are refilled a slice a frame),
 // the shadow cascades follow the camera, the casters and the water region are refreshed as the camera travels.
 //
 // Test hooks: window.__explore = { teleport(n), setLook(id), setPose([x,y,z], yawDeg, pitchDeg), mode(m), stats(),
@@ -67,6 +68,8 @@ export async function afterBuild(engine) {
 /** apply a look (time of day / season, src/world/looks.js) at the current camera */
 function setLook(id) {
   const e = S.engine, cam = e.camera;
+  // out of a still view first (its plants, levels and shadows are a still's: re-bucketed for the walk, not for a still)
+  S.leaveStill?.();
   const d = new THREE.Vector3(); cam.getWorldDirection(d);
   const p = cam.position;
   const yaw = S.walker?.yaw, pitch = S.walker?.pitch, fov = cam.fov;
@@ -96,6 +99,8 @@ function stillFov(fov, aspect) {
  *  width kept on narrower screens; the walker holds that pose until it is moved */
 function teleport(id, { look = true } = {}) {
   const e = S.engine;
+  S.leaveStill?.();
+  e.registry.vegetation?.sys?.farInvalidate?.();
   const v = viewpoint(e, id);
   const cam = e.camera;
   S.place = id;
@@ -243,6 +248,18 @@ export async function startExplore(engine, { buildMs }) {
     S.lodFade = new LodFade(engine);
     await S.lodFade.precompile();
   }
+  // the static geometry is uploaded now and its CPU copies dropped (src/core/compact.js; ?keepArrays=1 keeps them)
+  if (P.get('keepArrays') !== '1') {
+    const t0 = performance.now();
+    const C = await import('../core/compact.js');
+    const roots = ['yingzao', 'pagodas', 'city', 'karst', 'rocks', 'bridges', 'boats', 'tide', 'vegetation'].flatMap((n) => engine.moduleRoots?.[n] || []);
+    const vegGeos = (engine.registry.vegetation?.sys?.variants || []).flatMap((v) => v.lods.flatMap((l) => Object.values(l).filter((g) => g?.isBufferGeometry)));
+    let n = 0;
+    for (const r of roots) n += C.releaseOnUpload(r);
+    for (const g of vegGeos) n += C.releaseOnUpload({ traverse: (f) => f({ geometry: g }) });
+    const up = C.uploadNow(engine, roots, vegGeos);
+    console.log(`[explore] ${n} static geometries uploaded (${up}) and their CPU copies dropped in ${Math.round(performance.now() - t0)} ms`);
+  }
   // the countryside (src/explore/fields.js): hamlets' pieces at once, the fields when the workers have planned them
   // (low priority, a few seconds into the walk); ?farm=0 leaves it out
   if (P.get('farm') !== '0') {
@@ -285,7 +302,7 @@ export async function startExplore(engine, { buildMs }) {
   };
   const frame = (now) => {
     requestAnimationFrame(frame);
-    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    const frameMs = now - last, dt = Math.min(0.1, frameMs / 1000); last = now;
     W.lift = S.ui.lift;
     const tA = performance.now();
     let moved = W.update(dt);
@@ -304,7 +321,10 @@ export async function startExplore(engine, { buildMs }) {
     // the vegetation re-buckets its LODs from the moving camera (its own sentinel is hidden from the ink G-buffer pass)
     const veg = engine.registry.vegetation?.sys;
     let vegMs = 0;
-    if (veg && moved) { const tv = performance.now(); if (veg.maybeUpdate(engine.camera)) vegMs = performance.now() - tv; veg.farVisibility(engine.camera); }
+    // the far impostors' refill, a slice a frame (src/vegetation/system.js step)
+    let vegStep = 0;
+    if (veg) { const tv = performance.now(); if (veg.step(3)) S.dirty = Math.max(S.dirty, 1); vegStep = performance.now() - tv; }
+    if (veg && moved) { const tv = performance.now(); if (veg.maybeUpdate(engine.camera)) vegMs += performance.now() - tv; veg.farVisibility(engine.camera); }
     const tC = performance.now();
     // things that follow the traveller: casters in the shadow range, the water region's height map, boats near by
     const pt = S.prof ? {} : null, lap = (k, t) => { if (pt) pt[k] = performance.now() - t; return performance.now(); };
@@ -365,7 +385,7 @@ export async function startExplore(engine, { buildMs }) {
     S.dirty = moved ? 1 : S.dirty - 1;
     S.frame++;
     if (ink) { if (adapt(engine, now, moved)) S.dirty = 3; } else adaptResolution(engine, now, moved);
-    if (S.prof) { const tE = performance.now(); S.prof.push({ walk: tB - tA, terrain: tC - tB, place: t0 - tC, render: tE - t0, ...(engine.ink?.rtTimes || {}), vegMs, ...pt, dt: dt * 1000 }); if (S.prof.length > 600) S.prof.shift(); }
+    if (S.prof) { const tE = performance.now(); S.prof.push({ cpu: tE - tA, walk: tB - tA, terrain: tC - tB, place: t0 - tC, render: tE - t0, ...(engine.ink?.rtTimes || {}), vegMs, vegStep, ...pt, dt: frameMs }); if (S.prof.length > 600) S.prof.shift(); }
     times.push(now);
     while (times.length && now - times[0] > 1000) times.shift();
     if (!S.ui.fpsEl.hidden) {
@@ -458,6 +478,7 @@ function installTestHooks(engine, buildMs) {
     setLook: (id) => { setLook(id); return true; },
     mode: (m) => { W.setMode(m); return W.mode; },
     setPose: (pos, yawDeg = 0, pitchDeg = 0) => {
+      engine.registry.vegetation?.sys?.farInvalidate?.();
       W.setPose(new THREE.Vector3(...pos), (yawDeg * Math.PI) / 180, (pitchDeg * Math.PI) / 180);
       if (W.mode === 'walk') {
         const f = W.nearestFree(pos[0], pos[2]) || pos;
@@ -517,8 +538,11 @@ function installTestHooks(engine, buildMs) {
       const f = await window.__explore.fps(seconds, opts);
       const rows = S.prof; S.prof = null;
       const agg = {};
-      for (const k of ['walk', 'terrain', 'place', 'render']) { const v = rows.map((r) => r[k]); agg[k] = [+(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1), +Math.max(...v).toFixed(1)]; }
-      const slow = [...rows].sort((a, b) => b.dt - a.dt).slice(0, 5).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, +(+v).toFixed(1)])));
+      for (const k of ['cpu', 'walk', 'terrain', 'place', 'render', 'vegMs', 'vegStep']) { const v = rows.map((r) => r[k] || 0); agg[k] = [+(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1), +Math.max(...v).toFixed(1)]; }
+      // the slowest frame intervals, each with the CPU parts of the frame that ran in it (the row before: dt is the
+      // time since the previous frame began)
+      const fix = (r) => r && Object.fromEntries(Object.entries(r).map(([k, v]) => [k, +(+v).toFixed(1)]));
+      const slow = rows.map((r, i) => [r.dt, i]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([d, i]) => ({ dt: +d.toFixed(1), frame: fix(rows[i - 1]) }));
       return { ...f, cpu: agg, slow };
     },
     /** GPU cost of one live frame at the current pose (ms; frames rendered back to back, then a 1-pixel read of the

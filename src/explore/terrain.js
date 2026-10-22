@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { planLeaves } from '../terrain/mesh.js';
 import { getHeightPool } from './heightpool.js';
 
+function dropArray() { this.array = new this.array.constructor(0); }
 const key = (lf, N) => `${lf.x0},${lf.z0},${lf.size}` + (N ? '/' + N : '');
 
 export class StreamTerrain {
@@ -33,6 +34,7 @@ export class StreamTerrain {
     this.frame = 0;
     this.stats = { leaves: 0, tris: 0, swaps: 0, meshed: 0, lastSwapMs: 0 };
     this.onSwap = null;
+    this.release = true;
   }
 
   _plan(pos) {
@@ -50,6 +52,8 @@ export class StreamTerrain {
       g.setAttribute('normal', new THREE.BufferAttribute(m.normal, 3));
       g.setIndex(new THREE.BufferAttribute(m.index, 1));
       g.computeBoundingBox(); g.computeBoundingSphere();
+      // the CPU copies go once the patch is on the GPU (nothing reads them again; src/core/compact.js)
+      if (this.release) { for (const k in g.attributes) g.attributes[k].onUpload(dropArray); g.index.onUpload(dropArray); }
       const mesh = new THREE.Mesh(g, this.material);
       mesh.name = 'terrain:' + k;
       mesh.castShadow = true; mesh.receiveShadow = true;
@@ -142,12 +146,15 @@ export class StreamTerrain {
       for (const k of this.shown) { const c = this.cache.get(k); if (c) c.mesh.visible = true; }
       this.stillShown = null;
     }
+    this._evict();
   }
 
   _evict() {
     if (this.cache.size <= this.cacheSize) return;
     const still = new Set(this.stillShown || []);
-    const old = [...this.cache.entries()].filter(([k]) => !this.shown.has(k) && !still.has(k)).sort((a, b) => a[1].used - b[1].used);
+    // (the next plan's patches, and patches pinned by a reader, src/explore/watermap.js, stay)
+    const next = this.plan && !this.plan.done ? this.plan.keys : null;
+    const old = [...this.cache.entries()].filter(([k, c]) => !this.shown.has(k) && !still.has(k) && !next?.has(k) && !c.mesh.userData.pins).sort((a, b) => a[1].used - b[1].used);
     for (let i = 0; i < old.length && this.cache.size > this.cacheSize; i++) {
       const [k, c] = old[i];
       this.root.remove(c.mesh);

@@ -109,6 +109,10 @@ export async function build(engine) {
     sys.variants.forEach((v, k) => { for (let i = n0[k]; i < v.inst.length; i++) v.inst[i].ex = true; });
   }
   sys.finalize();
+  // the placer's occupancy grid (a few hundred thousand claims) is only needed while placing
+  delete stats.placer;
+  // the explorable world: the foliage atlas's pixels (64 MB with its mips) go once it is on the GPU
+  if (engine.explore) { const { foliageAtlas } = await import('../vegetation/atlas.js'); const A = foliageAtlas(); A.onUpdate = () => { A.mipmaps = []; A.image.data = null; A.onUpdate = null; }; }
   engine.add(sys.group);
   installHooks(engine, sys);
   // terrain: forest floor instead of the canopy pattern under the instanced trees round the first shot camera

@@ -12,6 +12,7 @@ import { LOOKS } from './looks.js';
 import { heightAt } from './heightfield.js';
 import { SHOTS } from './shots.js';
 import { setPlanCams } from './plancams.js';
+import { beginWelds, endWelds } from '../core/compact.js';
 
 export const MODULE_ORDER = [
   'terrain',      // lake bed, shores, plain, hills, hill country, river, distant ranges
@@ -53,6 +54,8 @@ export async function buildWorld(engine) {
   // progress for a loading screen (engine.onProgress(fraction, moduleName)), weighted by each module's usual build time;
   // the event loop gets a frame between modules so the page can paint it
   const WEIGHT = { terrain: 4, water: 2, yingzao: 14, pagodas: 3, karst: 2, rocks: 3, bridges: 2, city: 8, boats: 2, tide: 1, vegetation: 8, mist: 0.5 };
+  // the builders' meshes are welded (src/core/compact.js) in the height workers while the modules build
+  beginWelds();
   const todo = MODULE_ORDER.filter((n) => !(skip.includes(n) || (only.length && !only.includes(n))));
   const total = todo.reduce((s, n) => s + (WEIGHT[n] || 1), 0);
   let done = 0;
@@ -84,6 +87,9 @@ export async function buildWorld(engine) {
       console.error(`[world] module ${name} threw during build:`, e.stack || e);
     }
   }
+  const tw = performance.now();
+  await endWelds();
+  console.log(`[world] welds finished ${Math.round(performance.now() - tw)} ms after the last module`);
   engine.onProgress?.(1, 'done');
   // per-shot terrain occlusion assumes the fixed shot cameras: not in the explorable world
   if (engine.params.get('occlusion') !== '0' && !engine.explore) terrainOcclusion(engine);

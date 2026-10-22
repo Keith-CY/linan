@@ -391,18 +391,18 @@ export class Countryside {
   async _plantsOnFields() {
     const veg = this.engine.registry.vegetation?.sys;
     if (!veg) return;
-    const vs = veg.variants.filter((v) => v.inst.length && v.ctr);
-    const n = vs.reduce((a, v) => a + v.inst.length, 0);
+    const vs = veg.variants.filter((v) => v.n && v.ctr);
+    const n = vs.reduce((a, v) => a + v.n, 0);
     const pts = new Float32Array(n * 2);
     let k = 0;
-    for (const v of vs) for (let i = 0; i < v.inst.length; i++) { pts[k++] = v.ctr[i * 4]; pts[k++] = v.ctr[i * 4 + 2]; }
+    for (const v of vs) for (let i = 0; i < v.n; i++) { pts[k++] = v.ctr[i * 4]; pts[k++] = v.ctr[i * 4 + 2]; }
     const cov = await getHeightPool().farmCovers(this.plan, pts);
     this.offPlants = [];
     let o = 0, total = 0;
     for (const v of vs) {
       const idx = [];
-      for (let i = 0; i < v.inst.length; i++) if (cov[o + i]) idx.push(i);
-      o += v.inst.length;
+      for (let i = 0; i < v.n; i++) if (cov[o + i]) idx.push(i);
+      o += v.n;
       if (!idx.length) continue;
       const I = Int32Array.from(idx), H = new Float32Array(I.length);
       for (let q = 0; q < I.length; q++) H[q] = v.ctr[I[q] * 4 + 3];
