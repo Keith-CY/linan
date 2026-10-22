@@ -4,7 +4,11 @@
 //
 //   gInkA = (view normal x, view normal y, linear view depth (m), class id)
 //   gInkB = (sun irradiance on the surface (N·L × shadow × sun), sky irradiance (× AO), albedo luminance, emissive)
-//   gInkC = (object / instance origin − camera position (xyz, m), 1)   → tree masses: one origin per tree
+//   gInkC = (object / instance origin − the anchor (xyz, m), 1)   → tree masses: one origin per tree
+//           The anchor is the camera for a still. A moving camera keeps a fixed one (the tour video: the segment's
+//           viewpoint) or writes this attachment in 32-bit floats (the walking painting): measured from a moving camera in
+//           half floats an origin a few hundred metres off moves by centimetres from frame to frame, enough to change the
+//           hashes and the lattices of whole trees (their tone and every leaf mark popping).
 //
 // The class ids (CLS) come from the material name, the mesh name and the module that built the mesh
 // (engine.moduleRoots). A mesh whose class differs from its material's (the 布袋 figure shares the cliff material)
@@ -69,6 +73,7 @@ layout(location = 1) out highp vec4 gInkA;
 layout(location = 2) out highp vec4 gInkB;
 layout(location = 3) out highp vec4 gInkC;
 uniform float uInkClass;
+uniform vec3 uInkAnchor;
 #ifdef INK_ORG
 varying vec3 vInkOrg;
 #endif
@@ -99,7 +104,7 @@ function fragTail(std) {
     gInkA = vec4(inkN.xy, inkD, inkCls);
     gInkB = vec4(inkSun, inkSky, inkAlb, inkEm);
     #ifdef INK_ORG
-    gInkC = vec4(vInkOrg - cameraPosition, 1.0);
+    gInkC = vec4(vInkOrg - uInkAnchor, 1.0);
     #else
     gInkC = vec4(0.0, 0.0, 0.0, 0.0);
     #endif
@@ -117,6 +122,9 @@ const VERT_ORG = /* glsl */`
 #endif
 `;
 
+/** the point the G-buffer measures the objects' origins from (renderGBuffer sets it: the camera unless told otherwise) */
+export const INK_ANCHOR = { value: new THREE.Vector3() };
+
 /** add the ink outputs to one material (idempotent). cls: the material's default class */
 export function patchInkMaterial(mat, cls) {
   if (mat.userData.__inkPatched) return;
@@ -129,6 +137,7 @@ export function patchInkMaterial(mat, cls) {
   mat.onBeforeCompile = function (shader, renderer) {
     if (prev) prev.call(this, shader, renderer);
     shader.uniforms.uInkClass = U;
+    shader.uniforms.uInkAnchor = INK_ANCHOR;
     let vs = shader.vertexShader, fs = shader.fragmentShader;
     const org = vs.includes('#include <project_vertex>');
     if (org) {
@@ -183,12 +192,14 @@ export function patchScene(engine) {
   if (n) console.log(`[ink] patched ${n} materials`);
 }
 
-/** the G-buffer target: 4 attachments (colour is unused), half float, own depth */
-export function makeGBuffer(w, h) {
+/** the G-buffer target: 4 attachments (colour is unused), half float, own depth; { origins32 }: the origins'
+ *  attachment (gInkC) in 32-bit floats (a moving camera that measures them from itself) */
+export function makeGBuffer(w, h, { origins32 = false } = {}) {
   const rt = new THREE.WebGLRenderTarget(w, h, {
     count: 4, type: THREE.HalfFloatType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace,
     minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: true, stencilBuffer: false, generateMipmaps: false,
   });
+  if (origins32) rt.textures[3].type = THREE.FloatType;
   return rt;
 }
 
@@ -200,9 +211,12 @@ function waterMeshes(scene) {
   return out.length ? out : null;
 }
 
-/** render the G-buffer with the current (unjittered) camera; transparent veils stay out */
-export function renderGBuffer(engine, rt, { shadows = false } = {}) {
+/** render the G-buffer with the current (unjittered) camera; transparent veils stay out. anchor: [x, y, z] the
+ *  origins are measured from (default: the camera) */
+export function renderGBuffer(engine, rt, { shadows = false, anchor = null } = {}) {
   const r = engine.renderer, scene = engine.scene, cam = engine.camera;
+  if (anchor) INK_ANCHOR.value.set(anchor[0], anchor[1], anchor[2]);
+  else INK_ANCHOR.value.setFromMatrixPosition(cam.matrixWorld);
   const hidden = [], blended = [];
   const swapped = [];
   const water = shadows ? waterMeshes(scene) : null;

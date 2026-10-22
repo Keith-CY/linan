@@ -663,7 +663,10 @@ export class Pipeline {
     // the sun) and the meter is temporally smoothed (EMA, like the auto tone curve) on consecutive frames
     // the meter also feeds the LTM luminance cap, so it runs whenever either is on
     const ltmAny = (!this.realtime || this.realtimeLtm) && (GRADE.uLtmFine.value || GRADE.uLtmMid.value || GRADE.uLtmLarge.value || GRADE.uLtmBase.value);
-    if (GRADE.uAutoExpo.value > 0 || ltmAny) {
+    // gradeHeld (the tour video): the meter and the levels curve of the frame measured last are kept (src/video/player.js
+    // measures them once per segment, at its viewpoint), so the grade does not move with every frame of a camera move
+    const held = !!this.gradeHeld && !this.realtime;
+    if ((GRADE.uAutoExpo.value > 0 || ltmAny) && !(held && this.meterRT)) {
       this.meterRTs ||= [rt(128, 72, THREE.HalfFloatType), rt(128, 72, THREE.HalfFloatType)];
       this.meterMat ||= new THREE.ShaderMaterial({
         uniforms: { tSrc: { value: null }, tPrev: { value: null }, uW: { value: 1 } }, vertexShader: FS_VERT, depthTest: false, depthWrite: false,
@@ -753,6 +756,7 @@ export class Pipeline {
       U.uLut.value.set(this._lv.v);
       U.uLevelsOn.value = 1;
     } else if (S > 0 && this.realtime && this._lv) { U.uLut.value.set(this._lv.v); U.uLevelsOn.value = 1; }
+    else if (S > 0 && held && this._lv?.v) { U.uLut.value.set(this._lv.v); U.uLevelsOn.value = 1; }
     else if (S > 0) {
       this._lvTarget();
       const qw = this.lvRT.width, qh = this.lvRT.height;

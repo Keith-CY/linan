@@ -68,7 +68,8 @@ export function installInk(engine) {
   const gs = Number(P.get('inkGs')) || (engine.width > 2000 ? 1 : 2);
   const pipe = engine.pipeline;
   const painter = new InkPainter(engine.renderer, engine.width, engine.height, gs);
-  const gbuf = makeGBuffer(Math.round(engine.width * gs), Math.round(engine.height * gs));
+  // (the walking painting measures the origins from its moving camera: in 32-bit floats, src/ink/gbuffer.js)
+  const gbuf = makeGBuffer(Math.round(engine.width * gs), Math.round(engine.height * gs), { origins32: !!engine.explore });
   const ink = { style, styleName, painter, gbuf, gs, stats: {} };
   void painter;
   engine.ink = ink;
@@ -143,7 +144,8 @@ export function installInk(engine) {
     resolve(painter.toneRT, frame);
     GRADE.uGrain.value = grain;
     if (GRADE.uVignette.value.copy && vig.isVector2) GRADE.uVignette.value.copy(vig);
-    if (!gReady) { patchScene(engine); renderGBuffer(engine, gb); }
+    // ink.anchor: the point the G-buffer measures the objects' origins from (a moving camera's video: fixed per segment)
+    if (!gReady) { patchScene(engine); renderGBuffer(engine, gb, { anchor: ink.anchor }); }
     const id = engine.shot?.id;
     const ex = o.offline ? null : ink.explore;   // the explorable world: ink settings, mist distances and lattice axes from the walking camera
     const shot = ex ? ex.shot(id) : { ...S.inkShot(id), ...(engine.shot?.ink || {}) };
@@ -168,7 +170,7 @@ export function installInk(engine) {
     // while walking: engine.shot.pos), so the ripple rows and ground strokes do not slide with the walker
     const anchor = engine.shot?.pos || sp;
     const boreFront = shot.match ? engine.registry.tide?.inkFront?.() : null;
-    painter.paint(gb, engine.camera, style, shot, { focus, shotPos: sp, anchor, boreFront, sunI, sunDir: SUN.dir, axisR, axisF, dbg: dbg && dbg.startsWith('paint') ? Number(dbg.slice(5)) || 0 : 0 }, target);
+    painter.paint(gb, engine.camera, style, shot, { focus, shotPos: sp, anchor, org: gReady ? null : ink.anchor, motion: gReady || !!ink.motion, boreFront, sunI, sunDir: SUN.dir, axisR, axisF, dbg: dbg && dbg.startsWith('paint') ? Number(dbg.slice(5)) || 0 : 0 }, target);
     if (timing) gl.finish();
     ink.stats.inkMs = Math.round(performance.now() - t0);
     window.__STATS = { ...(window.__STATS || {}), inkMs: ink.stats.inkMs };

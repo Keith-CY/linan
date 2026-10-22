@@ -10,8 +10,10 @@
 //   --wm 0          no watermark in the frames (src/explore/watermark.js; on by default)
 //   --crf N         final H.264 quality (default 20)      --name file.mp4   output name in <out>
 //   --preset P      x264 preset of the final encode (default slow)
-//   --paints N      ink look: each frame the mean of N paintings from sub-pixel offsets of the camera (default 8;
-//                   steadies the strokes over fine detail in motion; 1 = one painting, as a still)
+//   --paints N      ink look: each frame the mean of N paintings, each at its own instant of the shutter interval and its
+//                   own sub-pixel offset of the camera (default 16; steadies the strokes over fine detail in motion and
+//                   blurs them along it; 1 = one painting, as a still)
+//   --shutter S     the shutter interval in frames (default src/video/sequence.js: 0.5 for both looks; 0 = one instant)
 //   --time-scale K  how fast the engine time (wind in the trees, water, clouds) runs within a segment (default 1;
 //                   0 = each place a frozen moment)
 //   --rest MS       idle after each frame (default 1500; GPU thermals on a shared machine)
@@ -42,7 +44,8 @@ const WM = String(args.wm ?? '1') !== '0';
 const CRF = Number(args.crf ?? 20);
 const PRESET = args.preset || 'slow';
 const TIME_SCALE = Number(args['time-scale'] ?? 1);
-const PAINTS = Number(args.paints ?? 8);
+const PAINTS = Number(args.paints ?? 16);
+const SHUTTER_ARG = args.shutter === undefined ? undefined : Number(args.shutter);
 const frameFilter = args.frames ? String(args.frames).split(',').map(Number) : null;
 const PAPER = '0xEEE8DB';   // the fade-out colour of the ink look (index.html --paper)
 const REST_MS = Number(args.rest ?? 1500);
@@ -144,7 +147,7 @@ async function renderAttempt(server, setBrowser) {
     let timer;
     const url = await Promise.race([
       // 2nd try of a frame that hung: shift the animation clock slightly (hangs so far were time-specific)
-      page.evaluate(async (i, f, spp, ts, o) => await window.__renderVideoFrame(i, f, spp, ts, o), i, f, SPP, fails ? 0.37 : 0, { wm: WM, timeScale: TIME_SCALE, paints: PAINTS }),
+      page.evaluate(async (i, f, spp, ts, o) => await window.__renderVideoFrame(i, f, spp, ts, o), i, f, SPP, fails ? 0.37 : 0, { wm: WM, timeScale: TIME_SCALE, paints: PAINTS, shutter: SHUTTER_ARG }),
       new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`frame seg${i + 1} f${f} timed out`)), FRAME_TIMEOUT_MS); }),
     ]).finally(() => clearTimeout(timer));
     CURRENT_FRAME = null;

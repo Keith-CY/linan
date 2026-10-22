@@ -294,6 +294,9 @@ uniform vec4 uMistBand;   // y0 (fully mist), y1 (clear), from distance, amount
 uniform float uSunI;
 uniform vec3 uSunW;     // direction to the sun (world)
 uniform float uFrame;
+uniform vec3 uOrg, uOrgRel;   // the point the G-buffer measured the origins (tC) from, and it minus the camera (src/ink/gbuffer.js)
+uniform float uProj;          // the tour video: lattices projected from the segment's viewpoint (uOrg)
+uniform float uMotion;        // a moving picture (the tour video, the walking painting): marks fade in and out instead of switching
 // where the painter puts the ink. Two foci (screen uv, radius as a fraction of the height, floor of the falloff)
 uniform vec4 uFocus0, uFocus1;
 uniform float uGrazeFix, uGrazeW;
@@ -404,6 +407,15 @@ vec3 paperColor(vec2 fc, out float grain) {
   return col;
 }
 
+// ---- a moving picture (uMotion: the tour video, the walking painting)
+// A mark is drawn where the density passes its own random threshold: a step in a still; in motion a short ramp, so a
+// mark at the edge of the density fades in and out as the density changes instead of popping
+float markOn(float hx, float dens) { return uMotion > 0.5 ? clamp((dens - hx) * 16.0, 0.0, 1.0) : step(hx, dens); }
+// The lattices' level of detail (their cell sizes, from metres per pixel) measured from the anchor (the video segment's
+// viewpoint) rather than the eye, within 1.5× of the eye's: the marks stay put on the world while the camera moves
+// instead of re-scaling every frame. e = the eye's distance to P; the factor for it (1 at the anchor)
+float lodK(vec3 P, float e) { return clamp(length(P - uOrg) / max(e, 1e-3), 0.667, 1.5); }
+
 // ---- 皴: hemp-fibre (披麻) or axe-cut (斧劈) strokes on a world lattice, oriented down the slope
 float cunLevel(vec2 q, vec2 dsl, float S, float pxu, float dens, float kind, float lev) {
   float cov = 0.0;
@@ -411,9 +423,10 @@ float cunLevel(vec2 q, vec2 dsl, float S, float pxu, float dens, float kind, flo
   for (int j = -2; j <= 2; j++) for (int i = -2; i <= 2; i++) {
     ivec3 cid = ivec3(gi + vec2(i, j), int(lev) * 31 + 7);
     vec4 h = h43(cid);
-    if (h.x > dens) continue;
+    float on = markOn(h.x, dens);
+    if (on <= 0.0) continue;
     vec2 c = (gi + vec2(i, j) + h.yz) * S;
-    float ink = 0.55 + 0.45 * h.w;
+    float ink = (0.55 + 0.45 * h.w) * on;
     if (kind < 0.5) {
       // 披麻: long, thin, gently bowed, tapering both ends
       vec2 d = rot2(dsl, (h.w - 0.5) * 0.45);
@@ -455,6 +468,13 @@ float streakLevel(vec2 q, vec2 dsl, float S, float dens, float kind, float lev) 
   else c *= 0.7 + 0.3 * smoothstep(0.2, 0.7, vnoise2(u * vec2(0.5, 1.5) + 9.0 + lev));
   return c;
 }
+// a fine horizontal hatching for the tour video's ground (q: sheet px as seen from the segment's viewpoint): rows ~2.2 px
+// apart, each broken into dashes of its own darkness (a still gets its hatching from one-pixel stripes, see below)
+float hatchRows(vec2 q) {
+  float r = q.y / 2.2, ri = floor(r), f = r - ri;
+  float a = vnoise2(vec2(q.x / 55.0 + ri * 0.37, ri * 0.73)) * 0.7 + vnoise2(vec2(q.x / 17.0, ri * 1.31 + 9.0)) * 0.3;
+  return (1.0 - smoothstep(0.18, 0.5, abs(f - 0.5))) * smoothstep(0.3, 0.75, a);
+}
 float cunStrokes(vec3 P, vec3 Nw, float fp, float dens, float kind) {
   vec3 an = abs(Nw);
   vec2 q, dsl;
@@ -486,7 +506,8 @@ float pineFans(vec2 p, float S, float pxu, float dens, float seed) {
   vec2 g = p / S; vec2 gi = floor(g);
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
     vec4 h = h43(ivec3(gi + vec2(i, j), int(seed)));
-    if (h.x > dens) continue;
+    float on = markOn(h.x, dens);
+    if (on <= 0.0) continue;
     vec2 c = (gi + vec2(i, j) + 0.15 + 0.7 * h.yz) * S;
     vec2 v = p - c; float r = length(v);
     float L = S * (0.62 + 0.3 * h.w);
@@ -503,9 +524,9 @@ float pineFans(vec2 p, float S, float pxu, float dens, float seed) {
     float dist = r * abs(sin(dA));
     float w = pxu * 0.45;
     float cv = smoothstep(w + pxu * 0.6, w - pxu * 0.2, dist) * smoothstep(L, L * 0.75, r) * smoothstep(0.0, L * 0.12, r);
-    cov = max(cov, cv * (0.65 + 0.35 * h.w));
+    cov = max(cov, cv * (0.65 + 0.35 * h.w) * on);
     // the dark knot where the needles meet
-    cov = max(cov, smoothstep(pxu * 1.6, pxu * 0.8, r) * 0.9);
+    cov = max(cov, smoothstep(pxu * 1.6, pxu * 0.8, r) * 0.9 * on);
   }
   return cov;
 }
@@ -514,7 +535,8 @@ float willowStrands(vec2 p, float S, float pxu, float dens, float seed) {
   vec2 g = p / vec2(S * 0.5, S); vec2 gi = floor(g);
   for (int j = 0; j <= 3; j++) for (int i = -1; i <= 1; i++) {
     vec4 h = h43(ivec3(gi + vec2(i, j), int(seed) + 3));
-    if (h.x > dens) continue;
+    float on = markOn(h.x, dens);
+    if (on <= 0.0) continue;
     vec2 top = (gi + vec2(i, j) + vec2(h.y, 0.5 + 0.5 * h.z)) * vec2(S * 0.5, S);
     float L = S * (3.5 + 3.0 * h.w);
     float t = (top.y - p.y) / L;
@@ -524,7 +546,7 @@ float willowStrands(vec2 p, float S, float pxu, float dens, float seed) {
     float cv = smoothstep(w + pxu * 0.6, w - pxu * 0.2, abs(p.x - x));
     // the strand fades out toward its tip and breaks where the brush lifts
     cv *= smoothstep(0.3, 0.5, vnoise2(vec2(h.y * 50.0, t * 5.0)));
-    cov = max(cov, cv * (0.55 + 0.45 * h.w) * (1.0 - 0.75 * t));
+    cov = max(cov, cv * (0.55 + 0.45 * h.w) * (1.0 - 0.75 * t) * on);
   }
   return cov;
 }
@@ -537,7 +559,8 @@ float leafDots(vec2 p, float S, float pxu, float dens, float seed, float ring, f
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
     for (int k = 0; k < 2; k++) {
       vec4 h = h43(ivec3(gi + vec2(i, j), int(seed) * 2 + k + 11));
-      if (h.x > dens) continue;
+      float on = markOn(h.x, dens);
+      if (on <= 0.0) continue;
       vec2 c = (gi + vec2(i, j) + h.yz) * S;
       float r = S * (0.22 + 0.16 * h.w);
       float a = (h.w - 0.5) * 1.6 + (k == 0 ? 0.3 : -0.5);
@@ -547,7 +570,7 @@ float leafDots(vec2 p, float S, float pxu, float dens, float seed, float ring, f
       float cv;
       if (ring > 0.5) cv = smoothstep(0.16 + aa, 0.16 - aa, abs(d - 0.85)) * 0.9;
       else cv = smoothstep(1.0 + aa, 1.0 - aa, d) * (0.72 + 0.28 * smoothstep(0.5, 1.0, d)); // wet rim
-      cov = max(cov, cv * (0.55 + 0.45 * h.x / max(dens, 1e-3)));
+      cov = max(cov, cv * (0.55 + 0.45 * h.x / max(dens, 1e-3)) * on);
     }
   }
   return cov;
@@ -560,14 +583,15 @@ float lobedLeaves(vec2 p, float S, float pxu, float dens, float seed, float lobe
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
     for (int k = 0; k < 2; k++) {
       vec4 h = h43(ivec3(gi + vec2(i, j), int(seed) * 2 + k + 61));
-      if (h.x > dens) continue;
+      float on = markOn(h.x, dens);
+      if (on <= 0.0) continue;
       vec2 c = (gi + vec2(i, j) + h.yz) * S;
       float r = S * (0.26 + 0.16 * h.w);
       vec2 v = rot2(p - c, h.w * 6.28);
       float a = atan(v.y, v.x);
       float rr = r * (0.55 + 0.45 * pow(abs(cos(a * lobes * 0.5)), 0.7));
       float aa = pxu * 0.8;
-      cov = max(cov, smoothstep(rr + aa, rr - aa, length(v)) * (0.6 + 0.4 * h.x / max(dens, 1e-3)));
+      cov = max(cov, smoothstep(rr + aa, rr - aa, length(v)) * (0.6 + 0.4 * h.x / max(dens, 1e-3)) * on);
     }
   }
   return cov;
@@ -578,11 +602,12 @@ float miDots(vec2 p, float S, float dens, float seed) {
   vec2 g = p / vec2(S * 1.3, S * 0.7); vec2 gi = floor(g);
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
     vec4 h = h43(ivec3(gi + vec2(i, j), int(seed) + 23));
-    if (h.x > dens) continue;
+    float on = markOn(h.x, dens);
+    if (on <= 0.0) continue;
     vec2 c = (gi + vec2(i, j) + h.yz) * vec2(S * 1.3, S * 0.7);
     vec2 v = (p - c) / (S * vec2(0.62, 0.3) * (0.8 + 0.4 * h.w));
     float d = length(v);
-    cov += smoothstep(1.0, 0.45, d) * (0.35 + 0.4 * h.w);
+    cov += smoothstep(1.0, 0.45, d) * (0.35 + 0.4 * h.w) * on;
   }
   return min(cov, 1.0);
 }
@@ -605,7 +630,8 @@ float ripples(vec3 P, float fp, float dens, float mode, vec3 R, vec3 F, float si
     float pxu = fp * uK;
     for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
       vec4 h = h43(ivec3(gi + vec2(i, j), int(lev) * 5 + 3));
-      if (mode < 0.5 && h.x > dens) continue;
+      float on = mode < 0.5 ? markOn(h.x, dens) : 1.0;
+      if (on <= 0.0) continue;
       vec2 c = (gi + vec2(i, j) + vec2(mode > 0.5 ? 0.5 * mod(gi.y + float(j), 2.0) : h.y, 0.5)) * vec2(S, Sv);
       vec2 v = q - c;
       float cv;
@@ -616,7 +642,7 @@ float ripples(vec3 P, float fp, float dens, float mode, vec3 R, vec3 F, float si
         float arc = -(1.0 - u * u) * Sv * 0.35;
         float w = pxu * 0.5 * (0.6 + 0.8 * h.z) * (1.0 - u * u * 0.7);
         cv = smoothstep(w + pxu * 0.5, w - pxu * 0.3, abs(v.y - arc) * sinG / max(sinG, 0.02) );
-        cv *= step(h.x, dens * 1.4);
+        cv *= markOn(h.x, dens * 1.4);
       } else {
         float L2 = S * (0.35 + 0.4 * h.z);
         float u = v.x / L2;
@@ -625,7 +651,7 @@ float ripples(vec3 P, float fp, float dens, float mode, vec3 R, vec3 F, float si
         float w = pxu * 0.5 * (1.0 - u * u);
         cv = smoothstep(w + pxu * 0.5, w - pxu * 0.3, abs(v.y - bow) * sinG / max(sinG, 0.02));
       }
-      c0 = max(c0, cv * (0.5 + 0.5 * h.w));
+      c0 = max(c0, cv * (0.5 + 0.5 * h.w) * on);
     }
     cov += c0 * (L == 0 ? 1.0 - t : t);
   }
@@ -829,6 +855,7 @@ void main() {
   vec2 uv = fc / uRes;
   ivec2 gp = ivec2(fc * uGs);
   vec4 A = texelFetch(tA, gp, 0), B = texelFetch(tB, gp, 0), Cc = texelFetch(tC, gp, 0);
+  vec3 Cw = Cc.xyz + uOrg, Cr = Cc.xyz + uOrgRel;   // the object's origin (world) and from the camera
   int cls = int(A.w + 0.5);
   float D = A.z;
   vec3 P = worldPosOf(uv, D);
@@ -837,6 +864,7 @@ void main() {
   vec3 Nv = vec3(A.xy, sqrt(max(0.0, 1.0 - dot(A.xy, A.xy))));
   vec3 Nw = normalize(mat3(uCamWorld) * Nv);
   float fp = D * uPxA;                 // metres per output px
+  if (uMotion > 0.5) fp *= lodK(P, length(P - uCamPos));
   vec3 camR = uAxisR, camU = vec3(0.0, 1.0, 0.0), camF = uAxisF;
   vec4 RG = texture2D(tRidge, uv);
   float rdist = RG.r;
@@ -903,7 +931,7 @@ void main() {
   // a crown is one soft mass: a light wash over it, deeper on the shaded underside (not blank paper in a grey rim)
   float clumpB = 0.0, clumpBody = 1.0, crownW = -1.0;
   if (isTree(cls) && Cc.w > 0.5 && uNight < 0.5) {
-    float under = smoothstep(0.0, 1.0, (Cc.y + uCamPos.y + 9.0 - P.y) / 9.0);   // lower part of the tree
+    float under = smoothstep(0.0, 1.0, (Cw.y + 9.0 - P.y) / 9.0);   // lower part of the tree
     w0 = max(w0, (0.22 + 0.38 * max(shade, under * 0.75)) * (cls == C_WILLOW ? 0.5 : 1.0) * uLook.y);
     // a crown as the targets paint it: clumps of foliage (a slow noise in the tree's own frame, flat pads
     // for pines, hanging masses for willows), each deeper on its underside and paler on top, paper showing between
@@ -911,8 +939,9 @@ void main() {
     // peach blossom (ink02) a breath of wash under dots of pale pink (the dots below, tinted)
     if (uLook3.y > 0.0 && cls == C_BLOSSOM) { crownW = 0.05 + 0.08 * shade; w0 = crownW; }
     if (uLook3.y > 0.0 && cls != C_BLOSSOM) {
-      vec3 O = Cc.xyz + uCamPos;
-      float fpo = length(Cc.xyz) * uPxA * uK;
+      vec3 O = Cw;
+      float fpo = length(Cr) * uPxA * uK;
+      if (uMotion > 0.5) fpo *= lodK(Cw, length(Cr));
       float hs = h13(ivec3(floor(O * 1.7)) + 91);
       vec2 lp = vec2(dot(P - O, uAxisR), P.y - O.y);
       float S = max(cls == C_WILLOW ? 1.6 : 2.6, fpo * 16.0);
@@ -949,7 +978,7 @@ void main() {
   if ((cls == C_ROOF || cls == C_CITYFAR) && uNight < 0.5) w0 = mix(0.6, 0.32, smoothstep(0.2, 0.85, LL.y));
   // 墨分五色 over a city: each building's roof its own depth of ink (some nearly black, some left almost paper)
   if (cls == C_ROOF && Cc.w > 0.5 && uNight < 0.5 && uPatch.y > 0.0) {
-    float bh = h13(ivec3(floor((Cc.xyz + uCamPos) * 0.5)) + 313);
+    float bh = h13(ivec3(floor(Cw * 0.5)) + 313);
     w0 *= mix(1.0, bh < 0.22 ? 1.9 : bh < 0.6 ? 1.0 : 0.4, uPatch.y);
   }
   // rock: crisp 斧劈 planes in layered tones (the painter's light, a value per facet, the photograph's own darks), the ink
@@ -1023,7 +1052,7 @@ void main() {
   // 墨荷: every leaf one wash of its own depth, wet at the rim, paper between the leaves
   else if (cls == C_LOTUS) {
     // 墨分五色: some leaves nearly black, some a breath of ink; the near ones heaviest
-    float lh = mix(Cc.w > 0.5 ? h13(ivec3(floor((Cc.xyz + uCamPos) * 3.1)) + 57) : 0.5, smoothstep(0.2, 0.8, lodNoise(vec3(P.x, 0.0, P.z) + 9.0, 1.6)), 0.55);
+    float lh = mix(Cc.w > 0.5 ? h13(ivec3(floor(Cw * 3.1)) + 57) : 0.5, smoothstep(0.2, 0.8, lodNoise(vec3(P.x, 0.0, P.z) + 9.0, 1.6)), 0.55);
     mul = (0.12 + 1.0 * lh * lh) * mix(1.15, 0.45, smoothstep(uNear * 0.5, uNear * 3.0, D)) * mix(0.35, 1.0, idk);
   }
   else if (cls == C_WALL || cls == C_SNOW) mul = 0.5;
@@ -1048,16 +1077,45 @@ void main() {
     // foreshortening from the shot's own camera (world-fixed, so the patches do not swim as the camera moves)
     // (the level of detail from the eye, blended between levels; the foreshortening of the lattice from the anchor)
     float Ds = length(P - uCamPos);
+    if (uMotion > 0.5) Ds *= lodK(P, Ds);
     // a walking camera (explore) keeps one fixed foreshortening: a per-pixel one from the moving eye would swim
     float sinG = mix(clamp((uAnchor.y - P.y) / max(length(P - uAnchor), 1.0), 0.03, 1.0), uGrazeFix, uGrazeW);
     float fps = Ds * uPxA;
-    float patchN = lodNoise(vec3(gq.x, 0.0, gq.y * sinG * 1.5) + 31.0, fps * 260.0 * uK);
-    float patches = smoothstep(0.3, 0.8, patchN);
     float l = log2(fps * 40.0 * uK); float l0 = floor(l);
-    vec2 sq = vec2(gq.x, gq.y * sinG * 1.5);
-    float st = mix(streakLevel(sq, vec2(1.0, 0.0), exp2(l0), 0.16, 1.0, l0), streakLevel(sq, vec2(1.0, 0.0), exp2(l0 + 1.0), 0.16, 1.0, l0 + 1.0), smoothstep(0.0, 1.0, l - l0));
+    float patchN, st, p2;
+    if (uMotion > 0.5 && uProj > 0.5) {
+      // the tour video: the ground's lattices projected from the segment's viewpoint, as a projector throws a slide
+      // (in sheet px as seen from there: the patches, the strokes and the hatching keep a still's sizes at the viewpoint
+      // and stay on the ground as the camera moves on). A still measures them from the eye with a foreshortening that
+      // varies from pixel to pixel and multiplies coordinates of thousands of metres: one-pixel stripes, which read as a
+      // fine horizontal hatching but flicker as soon as the camera moves; the hatching is drawn here on purpose
+      vec3 V = P - uOrg;
+      vec2 pq = vec2(atan(dot(V.xz, normalize(uAxisR.xz)), max(dot(V.xz, normalize(uAxisF.xz)), 0.01)), atan(-V.y, max(length(V.xz), 0.01))) / (uPxA * uK);
+      patchN = lodNoise(vec3(pq.x, 0.0, pq.y * 1.5) + 31.0, 260.0);
+      p2 = smoothstep(0.35, 0.75, lodNoise(vec3(pq.x, 0.0, pq.y * 2.5) + 57.0, 90.0));
+      st = streakLevel(pq, vec2(1.0, 0.0), 40.0, 0.16, 1.0, 5.0);
+      float hatch = hatchRows(pq);
+      patchN = mix(patchN, 0.3 + 0.65 * hatch * (0.6 + 0.8 * smoothstep(0.25, 0.75, patchN)), 0.85);
+    } else if (uMotion > 0.5) {
+      // the walking painting: the foreshortening quantised to powers of two and blended (applied directly, as a still
+      // does, it varies from pixel to pixel over coordinates of thousands of metres: stripes that flicker in motion)
+      float ks = log2(sinG * 1.5), ks0 = floor(ks), kt = smoothstep(0.0, 1.0, ks - ks0);
+      float kA = exp2(ks0), kB = kA * 2.0;
+      patchN = mix(lodNoise(vec3(gq.x, 0.0, gq.y * kA) + 31.0, fps * 260.0 * uK), lodNoise(vec3(gq.x, 0.0, gq.y * kB) + 31.0, fps * 260.0 * uK), kt);
+      p2 = smoothstep(0.35, 0.75, mix(lodNoise(vec3(gq.x, 0.0, gq.y * kA * 1.6667) + 57.0, fps * 90.0 * uK), lodNoise(vec3(gq.x, 0.0, gq.y * kB * 1.6667) + 57.0, fps * 90.0 * uK), kt));
+      float lt = smoothstep(0.0, 1.0, l - l0);
+      vec2 sA = vec2(gq.x, gq.y * kA), sB = vec2(gq.x, gq.y * kB);
+      float stA = mix(streakLevel(sA, vec2(1.0, 0.0), exp2(l0), 0.16, 1.0, l0), streakLevel(sA, vec2(1.0, 0.0), exp2(l0 + 1.0), 0.16, 1.0, l0 + 1.0), lt);
+      float stB = mix(streakLevel(sB, vec2(1.0, 0.0), exp2(l0), 0.16, 1.0, l0), streakLevel(sB, vec2(1.0, 0.0), exp2(l0 + 1.0), 0.16, 1.0, l0 + 1.0), lt);
+      st = mix(stA, stB, kt);
+    } else {
+      patchN = lodNoise(vec3(gq.x, 0.0, gq.y * sinG * 1.5) + 31.0, fps * 260.0 * uK);
+      vec2 sq = vec2(gq.x, gq.y * sinG * 1.5);
+      st = mix(streakLevel(sq, vec2(1.0, 0.0), exp2(l0), 0.16, 1.0, l0), streakLevel(sq, vec2(1.0, 0.0), exp2(l0 + 1.0), 0.16, 1.0, l0 + 1.0), smoothstep(0.0, 1.0, l - l0));
+      p2 = smoothstep(0.35, 0.75, lodNoise(vec3(gq.x, 0.0, gq.y * sinG * 2.5) + 57.0, fps * 90.0 * uK));
+    }
+    float patches = smoothstep(0.3, 0.8, patchN);
     float near = 1.0 - smoothstep(uFar * 0.25, uFar * 0.7, Ds);
-    float p2 = smoothstep(0.35, 0.75, lodNoise(vec3(gq.x, 0.0, gq.y * sinG * 2.5) + 57.0, fps * 90.0 * uK));
     float gw = (0.03 + 0.1 * patches + 0.06 * p2 + 0.03 * st * patches + 0.1 * baseK) * mix(0.45, 1.0, idk) * near * min(uLook2.y, 2.5);
     w1 = max(w1, gw * uInkGain);
   }
@@ -1299,8 +1357,9 @@ void main() {
   float leaf = 0.0, treeTone = 1.0;
   float th = 0.5;
   if (isTree(cls) && Cc.w > 0.5) {
-    vec3 O = Cc.xyz + uCamPos;
-    float Do = length(Cc.xyz);
+    vec3 O = Cw;
+    float Do = length(Cr);
+    if (uMotion > 0.5) Do *= lodK(Cw, Do);
     th = h13(ivec3(floor(O * 1.7)) + 91);
     treeTone = 0.7 + 0.6 * th;                       // 墨分五色: each tree its own tone
     float fpo = Do * uPxA * uK;
@@ -1343,7 +1402,7 @@ void main() {
   }
   float vein = 0.0;
   if (cls == C_LOTUS && Cc.w > 0.5) {
-    vec3 O = Cc.xyz + uCamPos;
+    vec3 O = Cw;
     vec2 v = P.xz - O.xz;
     float r = length(v);
     float a = atan(v.y, v.x) + h13(ivec3(floor(O * 3.1)) + 5) * 6.28;
@@ -1532,6 +1591,7 @@ void main() {
     vec2 v = fc - sOut;
     vec3 Ps = worldPosOf(sOut / uRes, SA.z);
     float fps = SA.z * uPxA * uK;
+    if (uMotion > 0.5) fps *= lodK(Ps, length(Ps - uCamPos));
     vec2 nrm = vec2(cos(E.z), sin(E.z)), tng = vec2(-nrm.y, nrm.x);
     float typ = E.w;
     float n1 = lodNoise(Ps, fps * 30.0);
@@ -1813,7 +1873,7 @@ void main() {
   if (uDbg > 1.5) gl_FragColor = vec4(tone, tB, cunInk, 1.0);
   if (uDbg > 2.5) gl_FragColor = vec4(idk, fK, cunInk, 1.0);
   if (uDbg > 3.5) gl_FragColor = vec4(mist, fK, exp(-RG.b / 35.0), 1.0);
-  if (uDbg > 4.5) gl_FragColor = vec4(Cc.w, fract((Cc.xyz + uCamPos) * 0.05).xy, 1.0);
+  if (uDbg > 4.5) gl_FragColor = vec4(Cc.w, fract(Cw * 0.05).xy, 1.0);
   if (uDbg > 5.5) gl_FragColor = vec4(clamp(RG.r / 40.0, 0.0, 1.0), wave, cls == C_WAVE ? 1.0 : 0.0, 1.0);
   if (uDbg > 6.5) gl_FragColor = vec4(lineInk + bleed, leaf, cunInk, 1.0);
   if (uDbg > 7.5) gl_FragColor = vec4(wash, detK, mist, 1.0);
@@ -1847,6 +1907,7 @@ export class InkPainter {
       pInk: v3(PIGMENT.ink), pZhe: v3(PIGMENT.zheshi), pHua: v3(PIGMENT.huaqing), pTeng: v3(PIGMENT.tenghuang), pZhu: v3(PIGMENT.zhusha),
       bShiqing: v3(PIGMENT.shiqing), bShilv: v3(PIGMENT.shilv), bZhusha: v3(PIGMENT.zhushaBody),
       tPaper: f(null), uPaperTex: f(0), uGrazeFix: f(0), uGrazeW: f(0), tSmoke: f(null), uSmokeOn: f(0),
+      uOrg: v3([0, 0, 0]), uOrgRel: v3([0, 0, 0]), uMotion: f(0), uProj: f(0),
       uLook: { value: new THREE.Vector4(0, 1, 1, 0) }, uLook2: { value: new THREE.Vector4(1, 1, 0, 0) }, uLook3: { value: new THREE.Vector4() }, uLook4: { value: new THREE.Vector4() }, uLook5: { value: new THREE.Vector4(0, 1, 0, 0) }, uLook6: { value: new THREE.Vector4() }, uBoreInk: { value: new THREE.Vector4() }, uBoreInk2: { value: new THREE.Vector4() }, uInkTint: v3([1, 1, 1]), uSkyTint: { value: new THREE.Vector4() }, uMoonCol: { value: new THREE.Vector4() }, uLampMirror: { value: 1 },
     });
     // the paper is fixed to the sheet: realtime painting (cachePaper = true) renders it once per size / style
@@ -1938,6 +1999,12 @@ export class InkPainter {
       U.uAxisR.value.copy(extra.axisR); U.uAxisF.value.copy(extra.axisF);
     }
     const tA = gbuf.textures[1], tB = gbuf.textures[2], tC = gbuf.textures[3];
+    // the origins' anchor (src/ink/gbuffer.js renderGBuffer): the camera unless the G-buffer was told another
+    const camP = this.paintMat.uniforms.uCamPos.value;
+    if (extra.org) this.paintMat.uniforms.uOrg.value.set(extra.org[0], extra.org[1], extra.org[2]); else this.paintMat.uniforms.uOrg.value.copy(camP);
+    this.paintMat.uniforms.uOrgRel.value.copy(this.paintMat.uniforms.uOrg.value).sub(camP);
+    this.paintMat.uniforms.uMotion.value = extra.motion ? 1 : 0;
+    this.paintMat.uniforms.uProj.value = extra.motion && extra.org ? 1 : 0;
     // tone blurs: ½ res (≈3 px) and ⅛ res (≈16 px)
     this._down(this.toneRT.texture, this.w, this.h, this.half0);
     this._blur(this.half0, this.half1, 1.0);

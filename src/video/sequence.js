@@ -13,7 +13,8 @@
 // (camera-move machinery from Athenaion)
 export const FPS = 30;
 export const XFADE = 1.2;      // seconds of cross-dissolve between consecutive segments
-export const SHUTTER = 0.5;    // 180° shutter for the photographic look (the ink look paints one instant per frame)
+export const SHUTTER = 0.5;    // 180° shutter for the photographic look (frames)
+export const INK_SHUTTER = 0.5; // the ink look's: its tone samples and its paintings spread over half a frame (player.js)
 
 export const SEQUENCE = [
   // 西湖全景 (spring): opens on the painting itself, then drifts in over the lake past the 樓閣
