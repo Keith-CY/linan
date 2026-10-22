@@ -72,7 +72,7 @@ const logs = [];
 // WebGL allocation counter (--glmem), installed before the page's scripts run
 const GLMEM = `(() => {
   const P = WebGL2RenderingContext.prototype;
-  const size = new Map(), kind = new Map(), tot = { buffer: 0, texture: 0, renderbuffer: 0 };
+  const size = new Map(), kind = new Map(), dims = new Map(), tot = { buffer: 0, texture: 0, renderbuffer: 0 };
   const set = (o, k, b) => { const old = size.get(o) || 0; size.set(o, b); kind.set(o, k); tot[k] += b - old; };
   const bpp = (gl, f, t) => {
     const T = { [gl.RGBA8]: 4, [gl.SRGB8_ALPHA8]: 4, [gl.RGBA16F]: 8, [gl.RGBA32F]: 16, [gl.R32F]: 4, [gl.R16F]: 2, [gl.RG16F]: 4, [gl.RG32F]: 8,
@@ -93,26 +93,31 @@ const GLMEM = `(() => {
   wrap('bindTexture', function (s, [t, x]) { s.tex.set(s.unit + ':' + t, x); });
   const texOf = (s, t) => s.tex.get(s.unit + ':' + (t >= this?.TEXTURE_CUBE_MAP_POSITIVE_X && t <= this?.TEXTURE_CUBE_MAP_NEGATIVE_Z ? this.TEXTURE_CUBE_MAP : t));
   const levels = (s, x, key, b) => { let m = s.lv.get(x); if (!m) s.lv.set(x, (m = new Map())); m.set(key, b); let sum = 0; for (const v of m.values()) sum += v; set(x, 'texture', sum); };
-  wrap('texStorage2D', function (s, [t, lv, f, w, h]) { const x = s.tex.get(s.unit + ':' + t); if (!x) return; let b = 0; for (let i = 0; i < lv; i++) b += Math.max(1, w >> i) * Math.max(1, h >> i) * bpp(this, f) * (t === this.TEXTURE_CUBE_MAP ? 6 : 1); levels(s, x, 'storage', b); });
+  wrap('texStorage2D', function (s, [t, lv, f, w, h]) { const x = s.tex.get(s.unit + ':' + t); if (!x) return; let b = 0; for (let i = 0; i < lv; i++) b += Math.max(1, w >> i) * Math.max(1, h >> i) * bpp(this, f) * (t === this.TEXTURE_CUBE_MAP ? 6 : 1); levels(s, x, 'storage', b); dims.set(x, w + 'x' + h + (lv > 1 ? 'm' + lv : '') + ':' + f); });
   wrap('texStorage3D', function (s, [t, lv, f, w, h, d]) { const x = s.tex.get(s.unit + ':' + t); if (!x) return; let b = 0; for (let i = 0; i < lv; i++) b += Math.max(1, w >> i) * Math.max(1, h >> i) * d * bpp(this, f); levels(s, x, 'storage', b); });
   wrap('texImage2D', function (s, a) {
     let [t, l, f] = a; let w, h, ty;
     if (a.length >= 8) { w = a[3]; h = a[4]; ty = a[7]; } else { const src = a[5]; w = src?.width || src?.videoWidth || 0; h = src?.height || src?.videoHeight || 0; ty = a[4]; }
     const cube = t >= this.TEXTURE_CUBE_MAP_POSITIVE_X && t <= this.TEXTURE_CUBE_MAP_NEGATIVE_Z;
     const x = s.tex.get(s.unit + ':' + (cube ? this.TEXTURE_CUBE_MAP : t)); if (!x) return;
+    if (l === 0) dims.set(x, w + 'x' + h + ':' + f);
     levels(s, x, t + ':' + l, w * h * bpp(this, f, ty));
   });
   wrap('texImage3D', function (s, [t, l, f, w, h, d, , , ty]) { const x = s.tex.get(s.unit + ':' + t); if (!x) return; levels(s, x, t + ':' + l, w * h * d * bpp(this, f, ty)); });
   wrap('generateMipmap', function (s, [t]) { const x = s.tex.get(s.unit + ':' + t); if (!x) return; const m = s.lv.get(x); if (!m || m.has('storage')) return; const b0 = m.get(t + ':0') || 0; m.set('mips', Math.round(b0 / 3)); let sum = 0; for (const v of m.values()) sum += v; set(x, 'texture', sum); });
-  wrap('deleteTexture', function (s, [x]) { if (size.has(x)) { tot.texture -= size.get(x); size.delete(x); s.lv.delete(x); } });
+  wrap('deleteTexture', function (s, [x]) { if (size.has(x)) { tot.texture -= size.get(x); size.delete(x); s.lv.delete(x); dims.delete(x); } });
   wrap('bindRenderbuffer', function (s, [t, r]) { s.rb = r; });
-  const dims = new Map();
   wrap('renderbufferStorage', function (s, [t, f, w, h]) { if (s.rb) { set(s.rb, 'renderbuffer', w * h * bpp(this, f)); dims.set(s.rb, w + 'x' + h + ':' + f); } });
   wrap('renderbufferStorageMultisample', function (s, [t, n, f, w, h]) { if (s.rb) { set(s.rb, 'renderbuffer', w * h * Math.max(1, n) * bpp(this, f)); dims.set(s.rb, w + 'x' + h + 'x' + n + ':' + f); } });
   wrap('deleteRenderbuffer', function (s, [r]) { if (size.has(r)) { tot.renderbuffer -= size.get(r); size.delete(r); dims.delete(r); } });
   window.__glmem = (detail) => {
     const out = Object.fromEntries(Object.entries(tot).map(([k, v]) => [k, +(v / 1048576).toFixed(1)]));
-    if (detail) { const rb = {}; for (const [r, d] of dims) if (size.has(r)) rb[d] = (rb[d] || 0) + 1; out.renderbuffers = rb; }
+    if (detail) {
+      const rb = {}, tx = {};
+      for (const [r, d] of dims) if (size.has(r)) { const k = kind.get(r); const o = k === 'renderbuffer' ? rb : tx; o[d] = o[d] || [0, 0]; o[d][0]++; o[d][1] += size.get(r) / 1048576; }
+      out.renderbuffers = rb;
+      out.textures = Object.fromEntries(Object.entries(tx).sort((a, b) => b[1][1] - a[1][1]).slice(0, 30).map(([d, [n, m]]) => [d, n + ' × ' + (m / n).toFixed(1) + ' MB']));
+    }
     return out;
   };
 })();`;

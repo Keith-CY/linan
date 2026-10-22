@@ -301,7 +301,7 @@ export async function startExplore(engine, { buildMs }) {
   };
   S.leaveStill = () => { if (SV) leaveStill(); };
   const enterStill = () => {
-    ST.phase = 'prep';
+    ST.phase = 'prep'; ST.walked = 0;
     farShadowsOn(engine);
     const n = ++ST.n;
     // at a viewpoint not moved since the teleport (and in its own look): the offline still itself
@@ -390,6 +390,8 @@ export async function startExplore(engine, { buildMs }) {
     }
     ST.idle = 0;
     if (SV) leaveStill();
+    // after 5 s of walking since the last still view, its targets go (src/ink/index.js releaseStill)
+    if (SV && moved) { ST.walked = (ST.walked || 0) + dt; if (ST.walked > 5 && ink.releaseStill()) ST.walked = 0; }
     const t0 = performance.now();
     if (ink) {
       farShadows(engine);

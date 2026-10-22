@@ -235,6 +235,15 @@ export function installInk(engine) {
     return ink.stillRT;
   };
   ink.renderStill = (o = {}) => { ink.stillBegin(); while (!ink.stillStep(STILL_SPP)); return ink.stillPaint(o); };
+  // the still view's targets (its painter at twice the G-buffer size, its G-buffer, its painting: ~400 MB of GPU
+  // memory at 1440 × 900) given back while the walker walks on; stillBegin makes them again
+  ink.releaseStill = () => {
+    if (!ink.stillPainter || !ink.stillPainter.w) return false;
+    for (const k of ['toneRT', 'edgeRT', 'jfa0', 'jfa1', 'ridgeRT', 'half0', 'half1', 'q0', 'e0', 'e1', 'l0', 'l1', 'lq', 'le0', 'le1', 'paperRT', 'smokeRT']) ink.stillPainter[k]?.dispose();
+    ink.stillPainter.w = 0;                 // (stillBegin resizes it, which makes its targets again)
+    ink.stillG?.dispose(); ink.stillRT?.dispose();
+    return true;
+  };
   // to the canvas: the live painting (FXAA, upscaled from the adaptive render scale), the still view over it (mix)
   ink.present = (mix = 0) => {
     const U = presentMat.uniforms;
