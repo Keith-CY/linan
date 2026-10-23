@@ -5,11 +5,13 @@
 //                               [--encode-only]
 //
 // The clock: the page's frame loop, performance.now() and its CSS animations run on a virtual clock that advances
-// 1/30 s per captured frame, so walking and flying speeds, the still view's fade and the place titles play at their real
-// pace however slowly the frames are captured. Where the page waits on real work — the still view preparing (terrain
-// meshed in the workers) and accumulating its samples — the clock follows the wall clock instead and the frame is held
-// (--honest 0 turns that off). The live painting is held at its best step (q=high, scale=1: the adaptive ladder
-// would read the virtual frame times).
+// 1/30 s per captured frame, so walking and flying speeds, the scene changes' dissolves, the still view's fade and the
+// place titles play at their real pace, frame by frame, however slowly the frames are captured. Where the page waits on
+// real work — the still view preparing (terrain meshed in the workers) and accumulating its samples — its frames run
+// with the clock stopped and are not recorded: the video leaves the wait out (on a fast machine it is a moment of the
+// same still picture). --honest 1 records it instead, the last frame held for as long as the work took here (the
+// clock jumps by as much: the fade and the titles then jump too). The live painting is held at its best step (q=high,
+// scale=1: the adaptive ladder would read the virtual frame times).
 //
 // The script (TIMELINE below): the 苏堤 viewpoint, a walk down the slab path to the 月洞 arch (望山桥), standing still
 // (the still view paints itself), key 3 to 曲院风荷 and T to its sunset, key 7 and a flight over the roofs of the
@@ -32,7 +34,7 @@ const FPS = 30, FRAME_MS = 1000 / FPS;
 const OUT = path.resolve(ROOT, args.out || 'out/walk');
 const NAME = args.name || 'walk.mp4';
 const CRF = Number(args.crf ?? 29);   // the paper's grain and the flight are costly: 29 keeps a 20 s capture near 7 MB
-const HONEST = String(args.honest ?? '1') !== '0';
+const HONEST = String(args.honest ?? '0') === '1';
 
 // [action, value]: press a key; hold keys for seconds (with an optional turn in degrees per second); wait seconds;
 // wait until the still view shows, then seconds more
@@ -43,13 +45,13 @@ const TIMELINE = [
   // stopping before its face
   ['hold', { keys: ['KeyW'], s: 2.0 }], ['hold', { keys: ['KeyW', 'ShiftLeft'], s: 2.2 }], ['hold', { keys: ['KeyW'], s: 0.5 }],
   ['still', 0.8],                              // stand: the still view paints itself
-  ['press', 'Digit3'], ['still', 0.6],         // key 3: 曲院风荷 in summer
-  ['press', 'KeyT'], ['still', 1.0],           // T: the next time of day, sunset over the lotus
+  ['press', 'Digit3'], ['still', 1.2],         // key 3: 曲院风荷 in summer
+  ['press', 'KeyT'], ['still', 1.2],           // T: the next time of day, sunset over the lotus
   ['press', 'Digit7'], ['still', 0.3],         // key 7: 临安御街 from above (a viewpoint in the air starts in flight)
   ['fly'],                                     // (F, unless already flying)
   // on over the roofs down the imperial way, climbing, then gliding on
   ['hold', { keys: ['Space', 'KeyW'], s: 1.5 }], ['hold', { keys: ['KeyW'], s: 1.8 }],
-  ['press', 'Digit5'], ['still', 1.6],         // key 5: 三潭印月 by moonlight
+  ['press', 'Digit5'], ['still', 2.6],         // key 5: 三潭印月 by moonlight (its title through to the end)
 ];
 
 // ------------------------------------------------------------------ GPU lock (as tools/render-video.mjs)
@@ -127,9 +129,13 @@ async function capture() {
       const buf = await page.screenshot({ type: 'jpeg', quality: 95, optimizeForSpeed: true });
       for (let k = 0; k < n; k++) fs.writeFileSync(path.join(OUT, `f${String(frame++).padStart(5, '0')}.jpg`), buf);
     };
-    // one frame of page time (more while the page waits on real work, held), then the screenshot
+    // one frame of page time, then the screenshot (the page's waits on real work first, off the clock; --honest 1:
+    // more page time while it waits, the frame held)
     const tick = async ({ turn = null, record = true } = {}) => {
       if (turn) await ev(`window.__explore.look(${turn[0] / FPS}, ${turn[1] / FPS})`);
+      if (!HONEST) await ev(`(async () => { const t0 = Date.now();
+        while (['prep', 'accum'].includes(window.__explore.phase()) && Date.now() - t0 < 120000) await window.__vstep(0);
+        return true; })()`);
       const phase = await ev('window.__explore.phase()');
       const ts = Date.now();
       let n = 1;

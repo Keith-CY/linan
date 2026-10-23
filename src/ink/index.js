@@ -258,16 +258,30 @@ export function installInk(engine) {
     ink.stillG?.dispose(); ink.stillRT?.dispose();
     return true;
   };
-  // to the canvas: the live painting (FXAA, upscaled from the adaptive render scale), the still view over it (mix)
-  ink.present = (mix = 0) => {
-    const U = presentMat.uniforms;
-    U.tLive.value = ink.liveRT?.texture || null; U.tStill.value = ink.stillRT?.texture || null;
-    U.uMix.value = ink.liveRT ? (ink.stillRT ? mix : 0) : 1;
+  // to the canvas (or target): the live painting (FXAA, upscaled from the adaptive render scale), the still view over it
+  // (mix), or with held, the frame held at a scene change (holdFrame)
+  ink.present = (mix = 0, held = false, target = null) => {
+    const U = presentMat.uniforms, over = held ? ink.heldRT : ink.stillRT;
+    U.tLive.value = ink.liveRT?.texture || null; U.tStill.value = over?.texture || null;
+    U.uMix.value = ink.liveRT ? (over ? mix : 0) : 1;
     if (ink.liveRT) U.uTexel.value.set(1 / ink.liveRT.width, 1 / ink.liveRT.height);
     U.uFxaa.value = P.get('fxaa') === '0' ? 0 : 1;
     presentQuad.material = presentMat;
-    engine.renderer.setRenderTarget(null);
+    engine.renderer.setRenderTarget(target);
     presentQuad.render(engine.renderer);
+    if (target) engine.renderer.setRenderTarget(null);
+  };
+  // a scene change (a viewpoint, a time of day) dissolves from the frame on the screen: present() drawn once more into
+  // a target of its own, which present(mix, true) lays over the new place's first live paintings. Two targets used in
+  // turn, so a dissolve can start from one still under way.
+  ink.holdFrame = (mix = 0, held = false) => {
+    if (!ink.liveRT) return false;
+    const W = engine.width, H = engine.height, rts = (ink.heldRTs ||= []);
+    const i = rts[0] && ink.heldRT === rts[0] ? 1 : 0;
+    if (!rts[i] || rts[i].width !== W || rts[i].height !== H) { rts[i]?.dispose(); rts[i] = colorRT(W, H); }
+    ink.present(mix, held, rts[i]);
+    ink.heldRT = rts[i];
+    return true;
   };
   ink.resize = (w, h) => {
     ink.painter.resize(w, h, gs);

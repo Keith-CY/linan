@@ -140,16 +140,17 @@ export function installPresent(engine) {
     try { rr(); } finally { ink.style.line = l; }
   };
   const own = ink.present;
-  ink.present = (mix = 0) => {
-    if (liveState().tier !== 'low' || !ink.liveRT) return own(mix);
-    const U = guidedMat.uniforms, Pn = ink.painter;
-    U.tLive.value = ink.liveRT.texture; U.tStill.value = ink.stillRT?.texture || null;
-    U.uMix.value = ink.stillRT ? mix : 0;
+  ink.present = (mix = 0, held = false, target = null) => {
+    if (liveState().tier !== 'low' || !ink.liveRT) return own(mix, held, target);
+    const U = guidedMat.uniforms, Pn = ink.painter, over = held ? ink.heldRT : ink.stillRT;
+    U.tLive.value = ink.liveRT.texture; U.tStill.value = over?.texture || null;
+    U.uMix.value = over ? mix : 0;
     U.uTexel.value.set(1 / ink.liveRT.width, 1 / ink.liveRT.height);
     U.tJfa.value = Pn.paintMat.uniforms.tJfa.value; U.tEdge.value = Pn.edgeRT.texture;
     U.uGRes.value.set(Pn.gw, Pn.gh);
     quad.material = guidedMat;
-    engine.renderer.setRenderTarget(null);
+    engine.renderer.setRenderTarget(target);
     quad.render(engine.renderer);
+    if (target) engine.renderer.setRenderTarget(null);
   };
 }

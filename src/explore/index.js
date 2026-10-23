@@ -9,7 +9,8 @@
 // attachment is the photographic tone), then the painter; ?look=photo renders the photographic frame (one sample).
 // When the camera has stood still for STILL_AFTER s the still view takes over (src/explore/still.js): the world in a
 // still's state, painted with the full still pipeline (src/ink/index.js renderStill) and faded in; at one of the ten
-// viewpoints, not moved since the teleport, it is the offline still itself. Moving again fades back to the live frame.
+// viewpoints, not moved since the teleport, it is the offline still itself. Moving again fades back to the live frame;
+// a new viewpoint or time of day dissolves from the frame on the screen (SCENE_FADE_S).
 // Live frames go through FXAA and are upscaled from the adaptive render scale (src/ink/index.js present). Streaming: the terrain is re-planned
 // around the camera (src/explore/terrain.js), the vegetation re-buckets its LODs from the moving camera (VegSystem; its
 // far impostors are refilled a slice a frame),
@@ -70,11 +71,12 @@ export async function afterBuild(engine) {
   if (ink && refl && P.get('refl') !== '1') { refl.enabled = false; refl.uniforms.uReflOn.value = 0; }
 }
 
-/** apply a look (time of day / season, src/world/looks.js) at the current camera */
-function setLook(id) {
+/** apply a look (time of day / season, src/world/looks.js) at the current camera; fade: dissolve from the frame on the
+ *  screen (a new look asked for, not the same one applied again in a new water region) */
+function setLook(id, fade = false) {
   const e = S.engine, cam = e.camera;
   // out of a still view first (its plants, levels and shadows are a still's: re-bucketed for the walk, not for a still)
-  S.leaveStill?.();
+  if (fade) S.sceneChange?.(); else S.leaveStill?.();
   const d = new THREE.Vector3(); cam.getWorldDirection(d);
   const p = cam.position;
   const yaw = S.walker?.yaw, pitch = S.walker?.pitch, fov = cam.fov;
@@ -105,7 +107,7 @@ function stillFov(fov, aspect) {
  *  width kept on narrower screens; the walker holds that pose until it is moved */
 function teleport(id, { look = true } = {}) {
   const e = S.engine;
-  S.leaveStill?.();
+  S.sceneChange?.();
   e.registry.vegetation?.sys?.farInvalidate?.();
   const v = viewpoint(e, id);
   const cam = e.camera;
@@ -205,7 +207,7 @@ export async function startExplore(engine, { buildMs }) {
   const W = S.walker;
   S.ui = new ExploreUI({
     onPlace: (id) => teleport(id),
-    onTime: (look) => setLook(look),
+    onTime: (look) => setLook(look, true),
     onMode: (m) => { W.setMode(m); S.ui.setState({ place: S.place, look: S.look, mode: W.mode }); },
   });
   W.bind(engine.canvas, S.ui);
@@ -216,7 +218,7 @@ export async function startExplore(engine, { buildMs }) {
     if (e.repeat) return;
     if (/^Digit[0-9]$/.test(e.code)) { const n = Number(e.code.slice(5)); teleport(n === 0 ? 10 : n); }
     else if (e.code === 'KeyF') { W.setMode(W.mode === 'fly' ? 'walk' : 'fly'); S.ui.setState({ place: S.place, look: S.look, mode: W.mode }); }
-    else if (e.code === 'KeyT') { const i = TIMES.findIndex((t) => t.look === S.look); setLook(TIMES[(i + 1) % TIMES.length].look); }
+    else if (e.code === 'KeyT') { const i = TIMES.findIndex((t) => t.look === S.look); setLook(TIMES[(i + 1) % TIMES.length].look, true); }
     else if (e.code === 'KeyM' || e.code === 'Tab') { e.preventDefault(); S.ui.toggle(); }
     else if (e.code === 'KeyP') {
       const p = engine.camera.position;
@@ -293,10 +295,13 @@ export async function startExplore(engine, { buildMs }) {
   // the still view: off with ?still=0
   const SV = ink && P.get('still') !== '0' ? new StillView(engine, { rockLite: S.rockLite, lodFade: S.lodFade, country: S.country }) : null;
   S.sv = SV;
-  const ST = (S.still = { phase: 'idle', idle: 0, mix: 0, t0: 0, out: 0, n: 0 });
+  // out: what is fading out over the live painting (1 → 0 in outS s): the still view left (linear), or with held the
+  // frame held at a scene change (eased)
+  const ST = (S.still = { phase: 'idle', idle: 0, mix: 0, t0: 0, out: 0, outS: STILL_OUT_S, held: false, n: 0 });
+  const outMix = () => (ST.held ? ST.out * ST.out * (3 - 2 * ST.out) : ST.out);
   const leaveStill = () => {
     if (ST.phase === 'idle') return;
-    if (ST.phase === 'fade' || ST.phase === 'shown') ST.out = ST.mix;
+    if (ST.phase === 'fade' || ST.phase === 'shown') { ST.out = ST.mix; ST.outS = STILL_OUT_S; ST.held = false; }
     ST.phase = 'idle'; ST.mix = 0;
     SV.exit();
     S.lastLod = null; S.lastCull = null;
@@ -304,6 +309,15 @@ export async function startExplore(engine, { buildMs }) {
     S.lodFade?.update(engine.camera.position);
   };
   S.leaveStill = () => { if (SV) leaveStill(); };
+  // a scene change (a viewpoint, a time of day): the frame on the screen — the still view, the live painting or a
+  // dissolve under way — held and dissolved into the new scene's live painting over SCENE_FADE_S (the page goes on
+  // painting until it is gone), not cut
+  S.sceneChange = () => {
+    const still = ST.phase === 'fade' || ST.phase === 'shown';
+    const held = !!ink?.holdFrame?.(still ? ST.mix : outMix(), !still && ST.held);
+    if (SV) leaveStill();
+    if (held) { ST.out = 1; ST.outS = SCENE_FADE_S; ST.held = true; }
+  };
   const enterStill = () => {
     ST.phase = 'prep'; ST.walked = 0;
     farShadowsOn(engine);
@@ -371,7 +385,7 @@ export async function startExplore(engine, { buildMs }) {
     if (S.lazy) { S.lazy.tick(p); if (S.lazy.changed) { S.lazy.changed = false; S.dirty = Math.max(S.dirty, 1); } }
     // the countryside's near tea rows, one tile a frame (src/explore/fields.js), not while a still view is up
     if (ST.phase === 'idle' && S.country?.step()) S.dirty = Math.max(S.dirty, 1);
-    if (!moved && S.dirty <= 0) {
+    if (!moved && S.dirty <= 0 && ST.out <= 0) {
       // standing still: the still view after STILL_AFTER s, faded in; once it shows (or with no still view), the
       // buildings' middle levels are built one at a time (src/explore/lodfade.js, 0.1–0.6 s each)
       ST.idle += dt;
@@ -400,9 +414,10 @@ export async function startExplore(engine, { buildMs }) {
     if (ink) {
       farShadows(engine);
       ink.renderRealtime();
-      // a still view that was showing fades out over the first live frames
-      ink.present(ST.out);
-      ST.out = Math.max(0, ST.out - dt / 0.18);
+      // a still view that was showing (or the frame held at a scene change) fades out over the first live frames
+      ink.present(outMix(), ST.held);
+      ST.out = Math.max(0, ST.out - dt / ST.outS);
+      if (ST.out <= 0) ST.held = false;
     } else { engine.lighting.refreshCSM(); engine.renderInteractive(true); }
     S.dirty = moved ? 1 : S.dirty - 1;
     S.frame++;
@@ -448,7 +463,7 @@ function farShadowsOn(engine) { const L = engine.lighting.csm?.lights; if (L?.le
  * ?scale=N (a fixed scale). The ink painting has its own ladder (src/explore/tier.js).
  */
 const AR = { t0: 0, n: 0, sum: 0, last: 0, scale: 1, changed: 0 };
-const STILL_AFTER = 0.3, STILL_FADE_MS = 450;
+const STILL_AFTER = 0.3, STILL_FADE_MS = 450, STILL_OUT_S = 0.18, SCENE_FADE_S = 0.45;
 function adaptResolution(engine, now, moved) {
   if (P.get('scale')) return;
   const dt = now - AR.last; AR.last = now;
