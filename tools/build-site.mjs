@@ -95,13 +95,16 @@ fs.writeFileSync(path.join(OUT, '_headers'), `# the bakes' and three.js's paths 
 /three/*/LICENSE
   ! Content-Type
   Content-Type: text/plain; charset=utf-8
-# the page and its modules: revalidated on every load (an update shows at once)
+# the page and its modules: revalidated on every load (an update shows at once). The modules are private: a zone's
+# Browser Cache TTL (lapla.si: 4 hours) replaces the Cache-Control of every file Cloudflare caches at its edge (a
+# max-age=0 or a no-cache alike), so a browser kept the old code for hours after a deploy; files it does not cache
+# keep their own
 /
   Cache-Control: public, max-age=0, must-revalidate
 /index.html
   Cache-Control: public, max-age=0, must-revalidate
 /src/*
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: private, no-cache
   Content-Type: text/javascript; charset=utf-8
 `);
 
