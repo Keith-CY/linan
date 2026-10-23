@@ -114,7 +114,9 @@ async function capture() {
     await page.setViewport({ width: W, height: H });
     page.on('console', (m) => { const t = m.text(); if ((m.type() === 'error' || m.type() === 'warning') && !t.includes('Failed to load resource')) console.log(`[page:${m.type()}] ${t}`); });
     page.on('pageerror', (e) => console.log('[page:error]', e.message));
-    const qs = new URLSearchParams({ q: 'high', scale: '1', ...Object.fromEntries(new URLSearchParams(args.params || '')) });
+    // (mblurMax=1: the motion blur without the page's cap, which keeps the blur of a run into the willows short for the
+    // eye; the video's flicker without it: 0.6 % of the pixels in its worst second, with it 1.5 %)
+    const qs = new URLSearchParams({ q: 'high', scale: '1', mblurMax: '1', ...Object.fromEntries(new URLSearchParams(args.params || '')) });
     await page.goto(`http://127.0.0.1:${server.port}/index.html?${qs}`, { waitUntil: 'load', timeout: 3600 * 1000 });
     await page.waitForFunction('window.__READY === true || !!window.__RENDER_ERROR', { timeout: 3600 * 1000, polling: 500 });
     const err = await page.evaluate(() => window.__RENDER_ERROR || null);

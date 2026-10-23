@@ -377,19 +377,24 @@ const taaMat = new THREE.ShaderMaterial({
 // nought at the next frame's place: a line still showed in a single frame). A mark that slides by more than
 // its own width between two frames (the slab joints and the shadows under the walker's feet, the roof tiles below a
 // flight, the leaves going by) otherwise lies in a pixel in one frame and is gone in the next: every fine mark pops.
-// Standing still nothing moves and nothing is blurred. ?mblur=0 turns it off, ?mblur=k sets TAA_BLUR.
-const TAA_BLUR = 1.75, TAA_TAPS = 16;
+// Standing still nothing moves and nothing is blurred. Only the walker's travel is blurred, not a turn of the head: a
+// turn slides the whole picture at once, and blurred it smeared the whole screen into streaks (dizzying under the
+// mouse); the history above follows a turn without it. The travel is taken over at most TAA_REF_MS (a slow frame does
+// not lengthen the exposure) and the blur is held to TAA_MAX of the frame's width.
+// ?mblur=0 turns it off, ?mblur=k sets TAA_BLUR, ?mblurMax=f sets TAA_MAX.
+const TAA_BLUR = 1.75, TAA_TAPS = 16, TAA_REF_MS = 1000 / 30, TAA_MAX = 0.025;
 const taaOutMat = new THREE.ShaderMaterial({
   glslVersion: THREE.GLSL3,
   uniforms: {
     tHist: { value: null }, tPaper: { value: null }, uPaperOn: { value: 0 }, tA: { value: null },
     uGRes: { value: new THREE.Vector2(1, 1) }, uRes: { value: new THREE.Vector2(1, 1) },
     uInvProj: { value: new THREE.Matrix4() }, uCamWorld: { value: new THREE.Matrix4() }, uPrevVP: { value: new THREE.Matrix4() }, uBlur: { value: TAA_BLUR }, uPass: { value: 1 },
+    uMax: { value: 64 },
   },
   vertexShader: 'out vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
   fragmentShader: /* glsl */`
     precision highp float;
-    uniform sampler2D tHist, tPaper, tA; uniform float uPaperOn, uBlur, uPass;
+    uniform sampler2D tHist, tPaper, tA; uniform float uPaperOn, uBlur, uPass, uMax;
     uniform vec2 uGRes, uRes; uniform mat4 uInvProj, uCamWorld, uPrevVP;
     in vec2 vUv; out vec4 o;
     void main() {
@@ -400,9 +405,11 @@ const taaOutMat = new THREE.ShaderMaterial({
         vec4 v = uInvProj * vec4(vUv * 2.0 - 1.0, 1.0, 1.0); vec3 r = v.xyz / v.w;
         vec3 Pw = (uCamWorld * vec4(r * (min(D, 40000.0) / -r.z), 1.0)).xyz;
         vec4 q = uPrevVP * vec4(Pw, 1.0);
-        // the travel (px) since the last frame; none known for a point behind the last camera
+        // the travel (px) since the last frame (uPrevVP: the last camera's place, this one's turn); none known for a
+        // point behind the last camera
         vec2 d = q.w > 0.0 ? vUv * uRes - (q.xy / q.w * 0.5 + 0.5) * uRes : vec2(0.0);
         float L = length(d) * uBlur;
+        if (L > uMax) { d *= uMax / L; L = uMax; }
         if (L > 0.5 && L < 2000.0) {
           // two passes of n taps (uPass 0: n taps spaced 2L / n, tent-weighted; 1: n taps over one such space): the
           // tent sampled n² times. Taps a few px apart are separate copies of every mark that step along as it moves
@@ -429,11 +436,14 @@ function taaRT(w, h) {
     minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false, stencilBuffer: false, generateMipmaps: false,
   });
 }
-const _vp = new THREE.Matrix4();
+const _vp = new THREE.Matrix4(), _mT = new THREE.Matrix4();
+const _pos = new THREE.Vector3(), _quat = new THREE.Quaternion(), _scl = new THREE.Vector3();
 function temporalAA(engine, ink, gbuf) {
   const cam = engine.camera, U = taaMat.uniforms, r = engine.renderer, P0 = ink.painter;
   const [hist, next] = ink.taaRTs;
   _vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+  cam.matrixWorld.decompose(_pos, _quat, _scl);
+  const now = performance.now(), frameMs = ink.taaT ? now - ink.taaT : TAA_REF_MS;
   // a jump (teleport, a new look): no history
   if (ink.taaCam && ink.taaCam.distanceTo(cam.position) > 6) ink.taaValid = false;
   const paper = P0.cachePaper && P0.paperRT ? P0.paperRT.texture : null;
@@ -449,9 +459,13 @@ function temporalAA(engine, ink, gbuf) {
   const O = taaOutMat.uniforms;
   O.tHist.value = next.texture; O.tPaper.value = paper; O.uPaperOn.value = paper ? 1 : 0;
   O.tA.value = U.tA.value; O.uGRes.value.copy(U.uGRes.value); O.uRes.value.copy(U.uRes.value);
-  O.uInvProj.value.copy(U.uInvProj.value); O.uCamWorld.value.copy(U.uCamWorld.value); O.uPrevVP.value.copy(U.uPrevVP.value);
+  O.uInvProj.value.copy(U.uInvProj.value); O.uCamWorld.value.copy(U.uCamWorld.value);
+  // the blur's last camera: where it stood, turned as this one is (the travel without the turn)
+  if (ink.taaValid && ink.taaPos) O.uPrevVP.value.multiplyMatrices(cam.projectionMatrix, _mT.compose(ink.taaPos, _quat, _scl).invert());
+  else O.uPrevVP.value.copy(_vp);
   const mb = engine.params.get('mblur');
-  O.uBlur.value = mb === '0' ? 0 : Number(mb) || TAA_BLUR;
+  O.uBlur.value = (mb === '0' ? 0 : Number(mb) || TAA_BLUR) * Math.min(1, TAA_REF_MS / Math.max(1, frameMs));
+  O.uMax.value = (Number(engine.params.get('mblurMax')) || TAA_MAX) * ink.rawRT.width;
   taaQuad.material = taaOutMat;
   if (O.uBlur.value > 0) {
     O.uPass.value = 0; r.setRenderTarget(ink.taaMid); taaQuad.render(r);
@@ -462,6 +476,8 @@ function temporalAA(engine, ink, gbuf) {
   ink.taaRTs = [next, hist];
   (ink.taaVP ||= new THREE.Matrix4()).copy(_vp);
   (ink.taaCam ||= new THREE.Vector3()).copy(cam.position);
+  (ink.taaPos ||= new THREE.Vector3()).copy(_pos);
+  ink.taaT = now;
   ink.taaValid = true;
   return ink.taaOut;
 }
