@@ -465,7 +465,7 @@ function farShadowsOn(engine) { const L = engine.lighting.csm?.lights; if (L?.le
  * ?scale=N (a fixed scale). The ink painting has its own ladder (src/explore/tier.js).
  */
 const AR = { t0: 0, n: 0, sum: 0, last: 0, scale: 1, changed: 0 };
-const STILL_AFTER = 0.3, STILL_FADE_MS = 450, STILL_OUT_S = 0.18, SCENE_FADE_S = 0.45, FOV_FADE_S = 0.3;
+const STILL_AFTER = 1.5, STILL_FADE_MS = 450, STILL_OUT_S = 0.18, SCENE_FADE_S = 0.45, FOV_FADE_S = 0.3;
 function adaptResolution(engine, now, moved) {
   if (P.get('scale')) return;
   const dt = now - AR.last; AR.last = now;

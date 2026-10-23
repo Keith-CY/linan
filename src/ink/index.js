@@ -26,10 +26,28 @@ function colorRT(w, h) {
 }
 
 // the explorable world's last pass: FXAA on the live painting (its brush lines are drawn from a 1× G-buffer, so
-// their edges step), upscaled to the canvas, and the still view faded in over it
+// their edges step), upscaled to the canvas, and the still view faded in over it. A still (or held frame) fading out
+// while the camera turns is read through uH (this pixel's ray → where it lay in that frame): it turns with the world,
+// not with the screen (an image fixed to the screen over a turning one swims); where it has no pixel, the live painting
+// (?reproj=0: fixed to the screen, as before)
 const presentQuad = new FullScreenQuad(null);
+export const OVER_GLSL = /* glsl */`
+  uniform mat3 uH; uniform float uRep;
+  vec2 overUv(vec2 uv) {
+    if (uRep < 0.5) return uv;
+    vec3 h = uH * vec3(uv * 2.0 - 1.0, 1.0);
+    vec2 s = h.z > 1e-4 ? h.xy / h.z * 0.5 + 0.5 : vec2(-1.0);
+    return all(greaterThanEqual(s, vec2(0.0))) && all(lessThanEqual(s, vec2(1.0))) ? s : vec2(-1.0);
+  }
+  // the mix there: none off that frame, feathered over its last 8 % (no seam where the turn has uncovered new ground)
+  float overMix(vec2 s, float mixv) {
+    if (s.x < 0.0) return 0.0;
+    if (uRep < 0.5) return mixv;
+    return mixv * smoothstep(0.0, 0.08, min(min(s.x, s.y), min(1.0 - s.x, 1.0 - s.y)));
+  }`;
 const presentMat = new THREE.ShaderMaterial({
-  uniforms: { tLive: { value: null }, tStill: { value: null }, uMix: { value: 0 }, uTexel: { value: new THREE.Vector2(1, 1) }, uFxaa: { value: 1 } },
+  uniforms: { tLive: { value: null }, tStill: { value: null }, uMix: { value: 0 }, uTexel: { value: new THREE.Vector2(1, 1) }, uFxaa: { value: 1 },
+    uH: { value: new THREE.Matrix3() }, uRep: { value: 0 } },
   vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
   fragmentShader: /* glsl */`
     uniform sampler2D tLive, tStill; uniform float uMix, uFxaa; uniform vec2 uTexel; varying vec2 vUv;
@@ -51,10 +69,13 @@ const presentMat = new THREE.ShaderMaterial({
       float lb = L(b);
       return (lb < lMin || lb > lMax) ? a : b;
     }
+    ${OVER_GLSL}
     void main() {
-      vec3 live = uMix >= 1.0 ? vec3(0.0) : (uFxaa > 0.5 ? fxaa(vUv) : texture2D(tLive, vUv).rgb);
-      vec3 still = uMix > 0.0 ? texture2D(tStill, vUv).rgb : vec3(0.0);
-      gl_FragColor = vec4(mix(live, still, uMix), 1.0);
+      vec2 su = overUv(vUv);
+      float m = overMix(su, uMix);
+      vec3 live = m >= 1.0 ? vec3(0.0) : (uFxaa > 0.5 ? fxaa(vUv) : texture2D(tLive, vUv).rgb);
+      vec3 still = m > 0.0 ? texture2D(tStill, su).rgb : vec3(0.0);
+      gl_FragColor = vec4(mix(live, still, m), 1.0);
     }`,
   depthTest: false, depthWrite: false,
 });
@@ -246,6 +267,8 @@ export function installInk(engine) {
     pipe.quality = q;
     pipe.realtime = true;
     ink.stillMs = Math.round(ink.stillT + performance.now() - t0);
+    if (!rtCam.has(ink.stillRT)) rtCam.set(ink.stillRT, camState());
+    camSnap(rtCam.get(ink.stillRT));
     return ink.stillRT;
   };
   ink.renderStill = (o = {}) => { ink.stillBegin(); while (!ink.stillStep(STILL_SPP)); return ink.stillPaint(o); };
@@ -258,6 +281,31 @@ export function installInk(engine) {
     ink.stillG?.dispose(); ink.stillRT?.dispose();
     return true;
   };
+  // the camera a frame (the still, a held frame, the screen's last) was painted from, and the map from this camera's
+  // rays to that frame's (rotation and field of view: a turn on the spot is exact, the few metres a walker goes while a
+  // still fades out are left out); none for a frame from another place (a teleport's held frame: a dissolve between
+  // two scenes)
+  const camState = () => ({ q: new THREE.Quaternion(), pos: new THREE.Vector3(), fov: 50, aspect: 1 });
+  const camSnap = (o) => { const c = engine.camera; c.updateMatrixWorld(); c.matrixWorld.decompose(o.pos, o.q, _scl3); o.fov = c.fov; o.aspect = c.aspect; return o; };
+  ink.shownCam = camState();
+  const rtCam = new WeakMap();   // a target → the camera its frame was painted from
+  /** sets uH / uRep for `over` (a target painted from the camera in rtCam) laid over this camera's view; true when it
+   *  is reprojected */
+  ink.overReproject = (U, over, mix, target) => {
+    const old = over && rtCam.get(over), cur = camSnap(_cur);
+    const on = !target && mix > 0 && !!old && cur.pos.distanceTo(old.pos) < REPROJECT_M && P.get('reproj') !== '0';
+    U.uRep.value = on ? 1 : 0;
+    if (on) {
+      const tc = Math.tan((cur.fov * Math.PI) / 360), to = Math.tan((old.fov * Math.PI) / 360);
+      _K.makeScale(tc * cur.aspect, tc, -1);                      // ndc (x, y, 1) → this camera's ray
+      _R.makeRotationFromQuaternion(cur.q);                       // → the world
+      _Ro.makeRotationFromQuaternion(old.q).transpose();          // → the old camera
+      _Ko.makeScale(1 / (to * old.aspect), 1 / to, -1);           // → its ndc (homogeneous)
+      U.uH.value.setFromMatrix4(_H4.multiplyMatrices(_Ko, _Ro).multiply(_R).multiply(_K));
+    }
+    if (!target) ink.shownCam = camSnap(ink.shownCam);
+    return on;
+  };
   // to the canvas (or target): the live painting (FXAA, upscaled from the adaptive render scale), the still view over it
   // (mix), or with held, the frame held at a scene change (holdFrame)
   ink.present = (mix = 0, held = false, target = null) => {
@@ -266,6 +314,7 @@ export function installInk(engine) {
     U.uMix.value = ink.liveRT ? (over ? mix : 0) : 1;
     if (ink.liveRT) U.uTexel.value.set(1 / ink.liveRT.width, 1 / ink.liveRT.height);
     U.uFxaa.value = P.get('fxaa') === '0' ? 0 : 1;
+    ink.overReproject(U, over, U.uMix.value, target);
     presentQuad.material = presentMat;
     engine.renderer.setRenderTarget(target);
     presentQuad.render(engine.renderer);
@@ -280,6 +329,10 @@ export function installInk(engine) {
     const i = rts[0] && ink.heldRT === rts[0] ? 1 : 0;
     if (!rts[i] || rts[i].width !== W || rts[i].height !== H) { rts[i]?.dispose(); rts[i] = colorRT(W, H); }
     ink.present(mix, held, rts[i]);
+    // (the frame on the screen was painted from the camera of the last present to it)
+    if (!rtCam.has(rts[i])) rtCam.set(rts[i], camState());
+    const c = rtCam.get(rts[i]);
+    c.q.copy(ink.shownCam.q); c.pos.copy(ink.shownCam.pos); c.fov = ink.shownCam.fov; c.aspect = ink.shownCam.aspect;
     ink.heldRT = rts[i];
     return true;
   };
@@ -437,6 +490,10 @@ function taaRT(w, h) {
   });
 }
 const _vp = new THREE.Matrix4(), _mT = new THREE.Matrix4();
+// the present pass's reprojection of a fading still (ink.overReproject)
+const REPROJECT_M = 30;
+const _K = new THREE.Matrix4(), _R = new THREE.Matrix4(), _Ro = new THREE.Matrix4(), _Ko = new THREE.Matrix4(), _H4 = new THREE.Matrix4();
+const _scl3 = new THREE.Vector3(), _cur = { q: new THREE.Quaternion(), pos: new THREE.Vector3(), fov: 50, aspect: 1 };
 const _pos = new THREE.Vector3(), _quat = new THREE.Quaternion(), _scl = new THREE.Vector3();
 function temporalAA(engine, ink, gbuf) {
   const cam = engine.camera, U = taaMat.uniforms, r = engine.renderer, P0 = ink.painter;

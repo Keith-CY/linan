@@ -16,6 +16,7 @@
 // URL: ?q=low | ?q=high fixes the tier, ?scale=N fixes the scale (both: no adaptation).
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+import { OVER_GLSL } from '../ink/index.js';
 
 const P = new URLSearchParams(location.search);
 const SCALES = [1, 0.9, 0.8, 0.7, 0.6, 0.55];
@@ -96,6 +97,7 @@ const guidedMat = new THREE.ShaderMaterial({
   glslVersion: THREE.GLSL3,
   uniforms: {
     tLive: { value: null }, tStill: { value: null }, tJfa: { value: null }, tEdge: { value: null },
+    uH: { value: new THREE.Matrix3() }, uRep: { value: 0 },
     uMix: { value: 0 }, uTexel: { value: new THREE.Vector2(1, 1) }, uGRes: { value: new THREE.Vector2(1, 1) },
   },
   vertexShader: 'out vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
@@ -131,10 +133,13 @@ const guidedMat = new THREE.ShaderMaterial({
       vec3 wash = mix(bil, max(bil, mix(bil, mx, 0.5)), side * smoothstep(0.03, 0.12, L(mx) - lm));
       return mix(wash, mn, cov);
     }
+    ${OVER_GLSL}
     void main() {
-      vec3 live = uMix >= 1.0 ? vec3(0.0) : guided(vUv);
-      vec3 still = uMix > 0.0 ? texture(tStill, vUv).rgb : vec3(0.0);
-      outColor = vec4(mix(live, still, uMix), 1.0);
+      vec2 su = overUv(vUv);
+      float m = overMix(su, uMix);
+      vec3 live = m >= 1.0 ? vec3(0.0) : guided(vUv);
+      vec3 still = m > 0.0 ? texture(tStill, su).rgb : vec3(0.0);
+      outColor = vec4(mix(live, still, m), 1.0);
     }`,
   depthTest: false, depthWrite: false,
 });
@@ -160,6 +165,7 @@ export function installPresent(engine) {
     const U = guidedMat.uniforms, Pn = ink.painter, over = held ? ink.heldRT : ink.stillRT;
     U.tLive.value = ink.liveRT.texture; U.tStill.value = over?.texture || null;
     U.uMix.value = over ? mix : 0;
+    ink.overReproject(U, over, U.uMix.value, target);
     U.uTexel.value.set(1 / ink.liveRT.width, 1 / ink.liveRT.height);
     U.tJfa.value = Pn.paintMat.uniforms.tJfa.value; U.tEdge.value = Pn.edgeRT.texture;
     U.uGRes.value.set(Pn.gw, Pn.gh);
