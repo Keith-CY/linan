@@ -11,7 +11,8 @@
 //
 // The ladder (from the best): high at scale 1, 0.9, 0.8, then low 0.9 … 0.55 (scale = the live painting's size as a
 // fraction of the window). A mean frame time over ~2 s of walking above 26 ms steps down, below 17.5 ms (6 s after
-// the last change) steps up; a step up that is undone within 8 s is not tried again for a minute.
+// the last change) steps up; a step up that is undone within 8 s is not tried again for a minute. A step is taken at
+// the walker's next pause, not in the middle of a turn.
 // URL: ?q=low | ?q=high fixes the tier, ?scale=N fixes the scale (both: no adaptation).
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
@@ -48,11 +49,19 @@ export function applyLive(engine) {
   }
 }
 
-/** call every live frame; returns true when the step changed (the caller redraws) */
+/** call every live frame; returns true when the step changed (the caller redraws). A step decided while the walker
+ *  moves is taken at the next pause (or after PENDING_MS of moving on): a change of size or tier in the middle of a turn
+ *  read as the whole picture jumping */
+const PENDING_MS = 8000;
 export function adapt(engine, now, moved) {
   const A = LIVE;
   if (A.steps.length < 2) return false;
   const dt = now - A.last; A.last = now;
+  if (A.pending != null && (!moved || now - A.pendingT > PENDING_MS)) {
+    const j = A.pending; A.pending = null;
+    A.t0 = now; A.n = 0; A.sum = 0;
+    return step(engine, j, now);
+  }
   if (!moved || dt > 250) { A.t0 = now; A.n = 0; A.sum = 0; return false; }
   A.n++; A.sum += dt;
   if (now - A.t0 < 2000 || A.n < 20) return false;
@@ -68,10 +77,16 @@ export function adapt(engine, now, moved) {
     A.lastUp = { t: now, from: A.i };
   }
   if (j === A.i) return false;
+  if (A.pending == null) A.pendingT = now;
+  A.pending = j; A.pendingMs = mean;
+  return false;
+}
+function step(engine, j, now) {
+  const A = LIVE;
   A.i = j; A.changed = now;
   applyLive(engine);
   const s = liveState();
-  console.log(`[explore] live painting ${s.tier} at ${s.scale.toFixed(2)} after ${mean.toFixed(1)} ms frames`);
+  console.log(`[explore] live painting ${s.tier} at ${s.scale.toFixed(2)} after ${A.pendingMs.toFixed(1)} ms frames`);
   return true;
 }
 

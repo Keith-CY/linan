@@ -128,7 +128,6 @@ function teleport(id, { look = true } = {}) {
   e.lighting.refreshCSM();
   S.country?.update(cam.position, true);
   S.atShot = id;
-  S.fovGoal = null;
   if (S.walker) {
     S.walker.fromCamera();
     // a viewpoint high above the ground (宝石山, over 御街, …) starts in flight
@@ -312,11 +311,11 @@ export async function startExplore(engine, { buildMs }) {
   // a scene change (a viewpoint, a time of day): the frame on the screen — the still view, the live painting or a
   // dissolve under way — held and dissolved into the new scene's live painting over SCENE_FADE_S (the page goes on
   // painting until it is gone), not cut
-  S.sceneChange = () => {
+  S.sceneChange = (fadeS = SCENE_FADE_S) => {
     const still = ST.phase === 'fade' || ST.phase === 'shown';
     const held = !!ink?.holdFrame?.(still ? ST.mix : outMix(), !still && ST.held);
     if (SV) leaveStill();
-    if (held) { ST.out = 1; ST.outS = SCENE_FADE_S; ST.held = true; }
+    if (held) { ST.out = 1; ST.outS = fadeS; ST.held = true; }
   };
   const enterStill = () => {
     ST.phase = 'prep'; ST.walked = 0;
@@ -336,13 +335,16 @@ export async function startExplore(engine, { buildMs }) {
     W.lift = S.ui.lift;
     const tA = performance.now();
     let moved = W.update(dt);
-    if (W.pinned === false && S.atShot) { S.atShot = null; S.fovGoal = fovFor(engine.camera.aspect); }
-    // after a teleport the still's narrow field of view widens back to the walking one once the walker moves
-    if (S.fovGoal) {
-      const cam = engine.camera;
-      cam.fov += (S.fovGoal - cam.fov) * (1 - Math.exp(-dt * 2.5));
-      if (Math.abs(cam.fov - S.fovGoal) < 0.05) { cam.fov = S.fovGoal; S.fovGoal = null; }
-      cam.updateProjectionMatrix(); engine.lighting.refreshCSM();
+    // after a teleport the still's narrower field of view gives way to the walking one as soon as the walker moves or
+    // looks: at once, under a short dissolve from the frame on the screen. (Widened over a second and a half, it zoomed
+    // out under a turning or walking view — a dolly zoom: the picture swam.)
+    if (W.pinned === false && S.atShot) {
+      S.atShot = null;
+      const cam = engine.camera, goal = fovFor(cam.aspect);
+      if (Math.abs(cam.fov - goal) > 0.05) {
+        S.sceneChange?.(FOV_FADE_S);
+        cam.fov = goal; cam.updateProjectionMatrix(); engine.lighting.refreshCSM();
+      }
       moved = true;
     }
     const p = engine.camera.position;
@@ -463,7 +465,7 @@ function farShadowsOn(engine) { const L = engine.lighting.csm?.lights; if (L?.le
  * ?scale=N (a fixed scale). The ink painting has its own ladder (src/explore/tier.js).
  */
 const AR = { t0: 0, n: 0, sum: 0, last: 0, scale: 1, changed: 0 };
-const STILL_AFTER = 0.3, STILL_FADE_MS = 450, STILL_OUT_S = 0.18, SCENE_FADE_S = 0.45;
+const STILL_AFTER = 0.3, STILL_FADE_MS = 450, STILL_OUT_S = 0.18, SCENE_FADE_S = 0.45, FOV_FADE_S = 0.3;
 function adaptResolution(engine, now, moved) {
   if (P.get('scale')) return;
   const dt = now - AR.last; AR.last = now;
